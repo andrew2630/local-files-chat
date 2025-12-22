@@ -1,18 +1,47 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 
 type SourceHit = { path: string; page: number; snippet: string; score: number };
 type ChatResponse = { answer: string; sources: SourceHit[] };
+type IndexProgress = { current: number; total: number; file: string; status: string };
 
 export default function App() {
   const [roots, setRoots] = useState<string[]>([]);
   const [chatModel, setChatModel] = useState("llama3.1:8b");
   const [embedModel, setEmbedModel] = useState("qwen3-embedding");
+  const [topK, setTopK] = useState(8);
   const [q, setQ] = useState("");
   const [log, setLog] = useState<{ role: "user" | "assistant"; text: string; sources?: SourceHit[] }[]>([]);
   const [busy, setBusy] = useState(false);
+  const [indexProgress, setIndexProgress] = useState<IndexProgress | null>(null);
+  const [indexDone, setIndexDone] = useState(false);
+
+  useEffect(() => {
+    let unlistenProgress: (() => void) | null = null;
+    let unlistenDone: (() => void) | null = null;
+
+    listen<IndexProgress>("index_progress", (event) => {
+      setIndexProgress(event.payload);
+      setIndexDone(false);
+    }).then((unlisten) => {
+      unlistenProgress = unlisten;
+    });
+
+    listen<boolean>("index_done", () => {
+      setIndexDone(true);
+      setIndexProgress(null);
+    }).then((unlisten) => {
+      unlistenDone = unlisten;
+    });
+
+    return () => {
+      unlistenProgress?.();
+      unlistenDone?.();
+    };
+  }, []);
 
   async function pickFolder() {
     const res = await open({ directory: true, multiple: false });
@@ -22,8 +51,7 @@ export default function App() {
   async function doIndex() {
     setBusy(true);
     try {
-      await invoke("start_index", { roots, embedModel });
-      alert("Index done (MVP).");
+      await invoke("start_index", { roots, embed_model: embedModel });
     } finally {
       setBusy(false);
     }
@@ -36,7 +64,12 @@ export default function App() {
     setLog((l) => [...l, { role: "user", text: query }]);
     setBusy(true);
     try {
-      const resp = (await invoke("chat", { query, roots, chatModel, embedModel })) as ChatResponse;
+      const resp = (await invoke("chat", {
+        question: query,
+        llm_model: chatModel,
+        embed_model: embedModel,
+        top_k: topK,
+      })) as ChatResponse;
       setLog((l) => [...l, { role: "assistant", text: resp.answer, sources: resp.sources }]);
     } finally {
       setBusy(false);
@@ -64,10 +97,34 @@ export default function App() {
         </div>
 
         <div style={{ marginTop: 12 }}>
+          <div><b>Top K</b></div>
+          <input
+            type="number"
+            min={1}
+            max={20}
+            value={topK}
+            onChange={(e) => setTopK(Number(e.target.value))}
+            style={{ width: "100%" }}
+          />
+        </div>
+
+        <div style={{ marginTop: 12 }}>
           <b>Folders</b>
           <ul>
             {roots.map((r) => <li key={r} style={{ wordBreak: "break-all" }}>{r}</li>)}
           </ul>
+        </div>
+
+        <div style={{ marginTop: 12, fontSize: 12 }}>
+          <b>Index status</b>
+          {indexProgress && (
+            <div>
+              <div>{indexProgress.status} {indexProgress.current}/{indexProgress.total}</div>
+              <div style={{ wordBreak: "break-all" }}>{indexProgress.file}</div>
+            </div>
+          )}
+          {!indexProgress && indexDone && <div>Index complete.</div>}
+          {!indexProgress && !indexDone && <div>Idle.</div>}
         </div>
       </div>
 
