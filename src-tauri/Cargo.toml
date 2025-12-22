@@ -22,4 +22,12 @@ tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-
+tauri-plugin-dialog = "2"
+thiserror = "1"
+anyhow = "1"
+walkdir = "2"
+rusqlite = { version = "0.32", features = ["bundled", "load_extension"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+pdf-extract = "0.10"
+whatlang = "0.18"
