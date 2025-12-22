@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "local-files-chat",
+  "productName": "Local Files Chat",
   "version": "0.1.0",
   "identifier": "com.andrzejpudzisz.local-files-chat",
   "build": {
@@ -22,7 +22,7 @@
     }
   },
   "bundle": {
-    "resources": ["resources/sqlite_vec0.dll"],
+    "resources": ["resources/vec0.dll"],
     "windows": {
       "webviewInstallMode": { "type": "offlineInstaller" }
     },
