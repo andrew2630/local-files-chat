@@ -25,6 +25,8 @@ fn chat(app: AppHandle, question: String, llm_model: String, embed_model: String
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   tauri::Builder::default()
+    .plugin(tauri_plugin_dialog::init())
+    .plugin(tauri_plugin_opener::init())
     .invoke_handler(tauri::generate_handler![start_index, chat])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");

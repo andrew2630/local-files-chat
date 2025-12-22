@@ -215,8 +215,8 @@ pub fn index_library(app: AppHandle, roots: Vec<String>, embed_model: String) ->
     let pages: Vec<&str> = if raw.contains('\x0C') { raw.split('\x0C').collect() } else { vec![raw.as_str()] };
 
     let tx = conn.transaction()?;
+    tx.execute("DELETE FROM vec_chunks WHERE rowid IN (SELECT id FROM chunks WHERE file_path=?1)", params![file_str])?;
     tx.execute("DELETE FROM chunks WHERE file_path=?1", params![file_str])?;
-    tx.execute("DELETE FROM vec_chunks WHERE rowid IN (SELECT id FROM chunks WHERE file_path=?1)", params![file_str]).ok();
     tx.execute(
       "INSERT OR REPLACE INTO files(path, hash, size, mtime, indexed_at) VALUES(?1, ?2, ?3, ?4, ?5)",
       params![file_str, hash, size, mtime, now_ts()]
