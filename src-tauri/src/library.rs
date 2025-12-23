@@ -1,12 +1,13 @@
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{fs, path::{Path, PathBuf}, time::{SystemTime, UNIX_EPOCH}};
+use std::{collections::{HashMap, HashSet}, fs, path::{Path, PathBuf}, time::{SystemTime, UNIX_EPOCH}};
 use tauri::{AppHandle, Emitter};
 use tauri::path::BaseDirectory;
 use walkdir::WalkDir;
 use whatlang::detect;
+use tauri::Manager;
+use rusqlite::{params, Connection, LoadExtensionGuard};
 
 use crate::ollama::{ChatMessage, Ollama};
 
@@ -34,6 +35,30 @@ pub struct ChatResult {
   pub sources: Vec<Source>,
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum IndexTargetKind {
+  File,
+  Folder,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexTarget {
+  pub path: String,
+  pub kind: IndexTargetKind,
+  #[serde(default)]
+  pub include_subfolders: bool,
+}
+
+#[derive(Serialize)]
+pub struct IndexFilePreview {
+  pub path: String,
+  pub status: String,
+  pub size: i64,
+  pub mtime: i64,
+}
+
 fn app_db_path(app: &AppHandle) -> Result<PathBuf> {
   // PathResolver ma app_local_data_dir, app_data_dir itd. 
   let dir = app.path().app_local_data_dir()?;
@@ -42,22 +67,27 @@ fn app_db_path(app: &AppHandle) -> Result<PathBuf> {
 }
 
 fn vec0_dll_path(app: &AppHandle) -> Result<PathBuf> {
+  if let Ok(p) = app.path().resolve("vec0.dll", BaseDirectory::Resource) {
+    return Ok(p);
+  }
   Ok(app.path().resolve("resources/vec0.dll", BaseDirectory::Resource)?)
 }
 
 fn open_db(app: &AppHandle) -> Result<Connection> {
   let db_path = app_db_path(app)?;
-  let mut conn = Connection::open(db_path)?;
+  let conn = Connection::open(db_path)?;
+
   conn.execute_batch(
     "PRAGMA journal_mode=WAL;
      PRAGMA synchronous=NORMAL;"
   )?;
 
-  // włącz loadable extensions tylko na czas ładowania vec0.dll
-  conn.load_extension_enable()?;
   let vec_path = vec0_dll_path(app)?;
-  conn.load_extension(vec_path.to_string_lossy().as_ref(), None)?;
-  conn.load_extension_disable()?;
+
+  unsafe {
+    let _guard = LoadExtensionGuard::new(&conn)?;
+    conn.load_extension(vec_path, None)?;
+  }
 
   Ok(conn)
 }
@@ -118,17 +148,49 @@ fn ensure_schema(conn: &Connection, dim: usize) -> Result<()> {
   Ok(())
 }
 
-fn list_pdfs(roots: &[String]) -> Vec<PathBuf> {
+fn is_pdf(p: &Path) -> bool {
+  p.extension()
+    .and_then(|x| x.to_str())
+    .map(|s| s.eq_ignore_ascii_case("pdf"))
+    .unwrap_or(false)
+}
+
+fn list_pdfs(targets: &[IndexTarget]) -> Vec<PathBuf> {
   let mut out = vec![];
-  for root in roots {
-    for e in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
-      if !e.file_type().is_file() { continue; }
-      let p = e.path();
-      if p.extension().and_then(|x| x.to_str()).map(|s| s.eq_ignore_ascii_case("pdf")).unwrap_or(false) {
-        out.push(p.to_path_buf());
+  let mut seen: HashSet<String> = HashSet::new();
+
+  for target in targets {
+    let base = PathBuf::from(&target.path);
+    match target.kind {
+      IndexTargetKind::File => {
+        if base.is_file() && is_pdf(&base) {
+          let key = base.to_string_lossy().to_string();
+          if seen.insert(key) {
+            out.push(base);
+          }
+        }
+      }
+      IndexTargetKind::Folder => {
+        if !base.is_dir() { continue; }
+        let walker = if target.include_subfolders {
+          WalkDir::new(&base)
+        } else {
+          WalkDir::new(&base).max_depth(1)
+        };
+
+        for e in walker.into_iter().filter_map(|e| e.ok()) {
+          if !e.file_type().is_file() { continue; }
+          let p = e.path();
+          if !is_pdf(p) { continue; }
+          let key = p.to_string_lossy().to_string();
+          if seen.insert(key) {
+            out.push(p.to_path_buf());
+          }
+        }
       }
     }
   }
+
   out
 }
 
@@ -175,7 +237,33 @@ fn now_ts() -> i64 {
   SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
 }
 
-pub fn index_library(app: AppHandle, roots: Vec<String>, embed_model: String) -> Result<()> {
+fn has_table(conn: &Connection, name: &str) -> Result<bool> {
+  let exists: Option<i32> = conn
+    .query_row(
+      "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1 LIMIT 1",
+      params![name],
+      |r| r.get(0),
+    )
+    .ok();
+  Ok(exists.is_some())
+}
+
+fn load_indexed_hashes(conn: &Connection) -> Result<HashMap<String, String>> {
+  if !has_table(conn, "files")? {
+    return Ok(HashMap::new());
+  }
+
+  let mut map = HashMap::new();
+  let mut stmt = conn.prepare("SELECT path, hash FROM files")?;
+  let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+  for row in rows {
+    let (path, hash) = row?;
+    map.insert(path, hash);
+  }
+  Ok(map)
+}
+
+pub fn index_library(app: AppHandle, targets: Vec<IndexTarget>, embed_model: String) -> Result<()> {
   let ollama = Ollama::new();
 
   // ustal dim embeddingów (jednym “test” embeddingiem)
@@ -183,10 +271,10 @@ pub fn index_library(app: AppHandle, roots: Vec<String>, embed_model: String) ->
   let dim = test.get(0).map(|v| v.len()).unwrap_or(0);
   anyhow::ensure!(dim > 0, "Embedding dim is 0 (model embed failed?)");
 
-  let conn = open_db(&app)?;
+  let mut conn = open_db(&app)?;
   ensure_schema(&conn, dim)?;
 
-  let pdfs = list_pdfs(&roots);
+  let pdfs = list_pdfs(&targets);
   let total = pdfs.len();
   app.emit("index_progress", IndexProgress { current: 0, total, file: "".into(), status: "start".into() })?;
 
@@ -277,6 +365,31 @@ pub fn index_library(app: AppHandle, roots: Vec<String>, embed_model: String) ->
   Ok(())
 }
 
+pub fn preview_index(app: &AppHandle, targets: Vec<IndexTarget>) -> Result<Vec<IndexFilePreview>> {
+  let conn = open_db(app)?;
+  let indexed = load_indexed_hashes(&conn)?;
+  let mut out = vec![];
+
+  for path in list_pdfs(&targets) {
+    let path_str = path.to_string_lossy().to_string();
+    let (hash, size, mtime) = file_fingerprint(&path)?;
+    let status = match indexed.get(&path_str) {
+      None => "new",
+      Some(old) if old == &hash => "indexed",
+      Some(_) => "changed",
+    };
+    out.push(IndexFilePreview {
+      path: path_str,
+      status: status.to_string(),
+      size,
+      mtime,
+    });
+  }
+
+  out.sort_by(|a, b| a.path.cmp(&b.path));
+  Ok(out)
+}
+
 pub fn chat(app: &AppHandle, question: String, llm_model: String, embed_model: String, top_k: i64) -> Result<ChatResult> {
   let ollama = Ollama::new();
   let conn = open_db(app)?;
@@ -331,12 +444,12 @@ pub fn chat(app: &AppHandle, question: String, llm_model: String, embed_model: S
     ));
   }
 
-  let system = "Jesteś asystentem RAG. Odpowiadaj TYLKO na podstawie podanych źródeł. \
-Jeśli w źródłach nie ma odpowiedzi, powiedz wprost, że nie wiesz. \
-Odpowiadaj w języku pytania użytkownika (PL/EN).";
+  let system = "Jestes asystentem RAG. Odpowiadaj tylko na podstawie podanych zrodel. \
+Jesli w zrodlach nie ma odpowiedzi, powiedz wprost, ze nie wiesz. \
+Odpowiadaj w jezyku pytania uzytkownika (PL/EN).";
 
   let user = format!(
-    "Pytanie:\n{}\n\nŹródła:\n{}\n\nOdpowiedź:",
+    "Pytanie:\n{}\n\nZrodla:\n{}\n\nOdpowiedz:",
     question, context_block
   );
 

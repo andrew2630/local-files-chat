@@ -54,6 +54,26 @@ impl Ollama {
       .map(|m| m.content)
       .ok_or_else(|| anyhow!("No message content in Ollama response"))
   }
+
+  pub fn list_models(&self) -> Result<Vec<String>> {
+    #[derive(Deserialize)]
+    struct TagsResponse {
+      models: Vec<ModelInfo>,
+    }
+    #[derive(Deserialize)]
+    struct ModelInfo {
+      name: String,
+    }
+
+    let resp: TagsResponse = self
+      .http
+      .get(format!("{OLLAMA_BASE}/tags"))
+      .send()?
+      .error_for_status()?
+      .json()?;
+
+    Ok(resp.models.into_iter().map(|m| m.name).collect())
+  }
 }
 
 #[derive(Serialize)]

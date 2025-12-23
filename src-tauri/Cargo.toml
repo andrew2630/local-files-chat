@@ -27,7 +27,8 @@ thiserror = "1"
 anyhow = "1"
 walkdir = "2"
 rusqlite = { version = "0.32", features = ["bundled", "load_extension"] }
-reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 pdf-extract = "0.10"
 whatlang = "0.18"
+sha2 = "0.10.9"
