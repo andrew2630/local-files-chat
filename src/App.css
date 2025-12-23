@@ -138,6 +138,17 @@ body {
   flex: 1;
 }
 
+.setup {
+  display: flex;
+  justify-content: center;
+  padding: 24px 0;
+}
+
+.setup-card {
+  max-width: 560px;
+  width: 100%;
+}
+
 .sidebar {
   display: flex;
   flex-direction: column;
@@ -411,6 +422,13 @@ input:disabled {
   gap: 6px;
 }
 
+.status-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
 .status-row {
   display: flex;
   align-items: center;
@@ -423,6 +441,58 @@ input:disabled {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 10px;
+}
+
+.setup-status {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.setup-models {
+  margin-top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.setup-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.setup-missing {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.setup-actions {
+  margin-top: 16px;
+  justify-content: flex-end;
+}
+
+.setup-logs {
+  margin-top: 16px;
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  background: var(--bg-soft);
+  padding: 12px;
+  max-height: 200px;
+  overflow: auto;
+}
+
+.setup-logs pre {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
 }
 
 .history-list {

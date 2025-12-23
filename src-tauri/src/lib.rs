@@ -2,14 +2,57 @@ mod ollama;
 mod library;
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use serde::Serialize;
 use std::{
   collections::{HashMap, HashSet},
+  io::{BufRead, BufReader},
   path::PathBuf,
+  process::{Command, Stdio},
   sync::{Arc, Mutex},
   time::{Duration, Instant},
 };
 use tauri::{AppHandle, Manager, State};
 use tauri::Emitter;
+
+const DEFAULT_CHAT_MODEL: &str = "llama3.1:8b";
+const DEFAULT_EMBED_MODEL: &str = "qwen3-embedding";
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SetupStatus {
+  running: bool,
+  models: Vec<String>,
+  default_chat: String,
+  default_embed: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SetupProgress {
+  stage: String,
+  message: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelPullProgress {
+  model: String,
+  line: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WatcherStatus {
+  status: String,
+  watched: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReindexProgress {
+  status: String,
+  files: Vec<String>,
+}
 
 #[derive(Clone)]
 struct AppState {
@@ -57,6 +100,73 @@ fn update_last_settings(state: &State<AppState>, embed_model: &str, settings: &l
   if let Ok(mut s) = state.inner.last_index_settings.lock() {
     *s = settings.clone();
   }
+}
+
+fn emit_setup_progress(app: &AppHandle, stage: &str, message: impl Into<String>) {
+  let _ = app.emit(
+    "setup_progress",
+    SetupProgress {
+      stage: stage.to_string(),
+      message: message.into(),
+    },
+  );
+}
+
+fn emit_setup_error(app: &AppHandle, message: impl Into<String>) {
+  let _ = app.emit("setup_error", message.into());
+}
+
+fn run_ollama_pull(app: &AppHandle, model: &str) -> Result<(), String> {
+  let mut child = Command::new("ollama")
+    .arg("pull")
+    .arg(model)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .map_err(|e| format!("failed to run ollama pull {model}: {e}"))?;
+
+  let stdout = child.stdout.take().ok_or("failed to capture ollama stdout")?;
+  let stderr = child.stderr.take().ok_or("failed to capture ollama stderr")?;
+
+  let app_out = app.clone();
+  let model_out = model.to_string();
+  let out_handle = std::thread::spawn(move || {
+    for line in BufReader::new(stdout).lines().flatten() {
+      let _ = app_out.emit(
+        "model_pull_progress",
+        ModelPullProgress {
+          model: model_out.clone(),
+          line,
+        },
+      );
+    }
+  });
+
+  let app_err = app.clone();
+  let model_err = model.to_string();
+  let err_handle = std::thread::spawn(move || {
+    for line in BufReader::new(stderr).lines().flatten() {
+      let _ = app_err.emit(
+        "model_pull_progress",
+        ModelPullProgress {
+          model: model_err.clone(),
+          line: format!("ERR: {line}"),
+        },
+      );
+    }
+  });
+
+  let status = child
+    .wait()
+    .map_err(|e| format!("ollama pull failed for {model}: {e}"))?;
+
+  let _ = out_handle.join();
+  let _ = err_handle.join();
+
+  if !status.success() {
+    return Err(format!("ollama pull failed for {model}"));
+  }
+  Ok(())
 }
 
 fn should_process(inner: &AppStateInner, path: &PathBuf) -> bool {
@@ -111,19 +221,63 @@ fn update_watcher(app: &AppHandle, state: &State<AppState>, targets: &[library::
         let settings = inner.last_index_settings.lock().unwrap().clone();
         let app_for_index = app_handle.clone();
         let app_for_error = app_handle.clone();
+        let files_for_done = files.clone();
+
+        let _ = app_handle.emit(
+          "reindex_progress",
+          ReindexProgress {
+            status: "queued".into(),
+            files: files.clone(),
+          },
+        );
 
         tauri::async_runtime::spawn(async move {
           let app_for_error_clone = app_for_error.clone();
           let res = tauri::async_runtime::spawn_blocking(move || {
             library::index_files(&app_for_index, files, embed_model, settings)
           }).await;
-          if let Ok(Err(e)) = res {
-            let _ = app_for_error_clone.emit("index_error", e.to_string());
+          match res {
+            Ok(Ok(())) => {
+              let _ = app_for_error_clone.emit(
+                "reindex_progress",
+                ReindexProgress {
+                  status: "done".into(),
+                  files: files_for_done,
+                },
+              );
+            }
+            Ok(Err(e)) => {
+              let _ = app_for_error_clone.emit("index_error", e.to_string());
+              let _ = app_for_error_clone.emit(
+                "reindex_progress",
+                ReindexProgress {
+                  status: "error".into(),
+                  files: files_for_done,
+                },
+              );
+            }
+            Err(e) => {
+              let _ = app_for_error_clone.emit("index_error", format!("reindex task join error: {e}"));
+              let _ = app_for_error_clone.emit(
+                "reindex_progress",
+                ReindexProgress {
+                  status: "error".into(),
+                  files: files_for_done,
+                },
+              );
+            }
           }
         });
       }
       Err(e) => {
         let _ = app_handle.emit("index_error", format!("watcher error: {e}"));
+        let _ = app_handle.emit(
+          "watcher_status",
+          WatcherStatus {
+            status: "error".into(),
+            watched: 0,
+          },
+        );
       }
     }
   }).map_err(|e| e.to_string())?;
@@ -160,6 +314,85 @@ fn update_watcher(app: &AppHandle, state: &State<AppState>, targets: &[library::
   *inner.watched.lock().unwrap() = watched;
   *inner.target_files.lock().unwrap() = target_files;
   *inner.folder_roots.lock().unwrap() = folder_roots;
+  let _ = app.emit(
+    "watcher_status",
+    WatcherStatus {
+      status: "watching".into(),
+      watched: inner.watched.lock().unwrap().len(),
+    },
+  );
+  Ok(())
+}
+
+#[tauri::command]
+async fn setup_status() -> Result<SetupStatus, String> {
+  let timeout = Duration::from_secs(2);
+  match ollama::list_models_with_timeout(timeout).await {
+    Ok(models) => Ok(SetupStatus {
+      running: true,
+      models,
+      default_chat: DEFAULT_CHAT_MODEL.to_string(),
+      default_embed: DEFAULT_EMBED_MODEL.to_string(),
+    }),
+    Err(_) => Ok(SetupStatus {
+      running: false,
+      models: vec![],
+      default_chat: DEFAULT_CHAT_MODEL.to_string(),
+      default_embed: DEFAULT_EMBED_MODEL.to_string(),
+    }),
+  }
+}
+
+#[tauri::command]
+fn run_setup(app: AppHandle) -> Result<(), String> {
+  let app_handle = app.clone();
+  tauri::async_runtime::spawn(async move {
+    emit_setup_progress(&app_handle, "check", "Checking Ollama...");
+    let timeout = Duration::from_secs(2);
+    let models = match ollama::list_models_with_timeout(timeout).await {
+      Ok(models) => models,
+      Err(e) => {
+        emit_setup_error(&app_handle, format!("Ollama is not running: {e}"));
+        return;
+      }
+    };
+
+    let mut missing = Vec::new();
+    if !models.iter().any(|m| m == DEFAULT_CHAT_MODEL) {
+      missing.push(DEFAULT_CHAT_MODEL.to_string());
+    }
+    if !models.iter().any(|m| m == DEFAULT_EMBED_MODEL) {
+      missing.push(DEFAULT_EMBED_MODEL.to_string());
+    }
+
+    if missing.is_empty() {
+      emit_setup_progress(&app_handle, "done", "All required models are already installed.");
+      let _ = app_handle.emit("setup_done", true);
+      return;
+    }
+
+    let app_for_pull = app_handle.clone();
+    let res = tauri::async_runtime::spawn_blocking(move || {
+      for model in missing {
+        emit_setup_progress(&app_for_pull, "pull", format!("Pulling {model}..."));
+        run_ollama_pull(&app_for_pull, &model)?;
+      }
+      Ok::<(), String>(())
+    }).await;
+
+    match res {
+      Ok(Ok(())) => {
+        emit_setup_progress(&app_handle, "done", "Setup complete.");
+        let _ = app_handle.emit("setup_done", true);
+      }
+      Ok(Err(e)) => {
+        emit_setup_error(&app_handle, e);
+      }
+      Err(e) => {
+        emit_setup_error(&app_handle, format!("setup task join error: {e}"));
+      }
+    }
+  });
   Ok(())
 }
 
@@ -260,6 +493,8 @@ pub fn run() {
       Ok(())
     })
     .invoke_handler(tauri::generate_handler![
+      setup_status,
+      run_setup,
       start_index,
       chat,
       reindex_files,

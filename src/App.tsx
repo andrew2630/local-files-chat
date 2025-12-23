@@ -1,13 +1,19 @@
 ﻿import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import "./App.css";
 
 type SourceHit = { file_path: string; page: number; snippet: string; distance: number };
 type ChatResponse = { answer: string; sources: SourceHit[] };
 type IndexProgress = { current: number; total: number; file: string; status: string };
+type SetupStatus = { running: boolean; models: string[]; defaultChat: string; defaultEmbed: string };
+type SetupProgress = { stage: string; message: string };
+type ModelPullProgress = { model: string; line: string };
+type WatcherStatus = { status: string; watched: number };
+type ReindexProgress = { status: string; files: string[] };
+type SetupState = "checking" | "needs" | "running" | "ready";
 
 type IndexTarget = {
   id: string;
@@ -71,12 +77,33 @@ const STORAGE_KEYS = {
   retrievalSettings: "ui.retrievalSettings",
   sessions: "chat.sessions",
   activeSession: "chat.activeSessionId",
+  setupComplete: "setup.complete",
 };
 
 const copy = {
   pl: {
     appTitle: "Local Files Chat",
     appSubtitle: "Rozmawiaj z lokalnymi dokumentami (RAG)",
+    setupTitle: "Konfiguracja / Zależności",
+    setupSubtitle: "Aplikacja wymaga lokalnej instancji Ollama i domyślnych modeli.",
+    setupChecking: "Sprawdzanie zależności...",
+    setupRunning: "Pobieranie modeli...",
+    setupReady: "Gotowe",
+    setupError: "Błąd konfiguracji",
+    setupHint: "Po instalacji Ollama kliknij „Spróbuj ponownie”.",
+    installOllama: "Zainstaluj Ollama",
+    retry: "Spróbuj ponownie",
+    requiredModels: "Wymagane modele",
+    missingModels: "Brakujące modele",
+    reRunSetup: "Uruchom ponownie setup",
+    ollamaNotRunning: "Ollama nie jest uruchomiona.",
+    setupLogs: "Logi instalacji",
+    watcherStatus: "Watcher",
+    watcherWatching: "Monitor aktywny",
+    reindexStatus: "Auto-reindeksacja",
+    reindexQueued: "W kolejce",
+    reindexDone: "Zakończono",
+    reindexError: "Błąd",
     language: "Język",
     theme: "Motyw",
     themeSystem: "System",
@@ -156,6 +183,26 @@ const copy = {
   en: {
     appTitle: "Local Files Chat",
     appSubtitle: "Chat with your local documents (RAG)",
+    setupTitle: "Setup / Dependencies",
+    setupSubtitle: "The app needs a local Ollama instance and default models.",
+    setupChecking: "Checking dependencies...",
+    setupRunning: "Downloading models...",
+    setupReady: "Ready",
+    setupError: "Setup error",
+    setupHint: "After installing Ollama, click Retry.",
+    installOllama: "Install Ollama",
+    retry: "Retry",
+    requiredModels: "Required models",
+    missingModels: "Missing models",
+    reRunSetup: "Re-run setup",
+    ollamaNotRunning: "Ollama is not running.",
+    setupLogs: "Setup logs",
+    watcherStatus: "Watcher",
+    watcherWatching: "Watching",
+    reindexStatus: "Auto reindex",
+    reindexQueued: "Queued",
+    reindexDone: "Done",
+    reindexError: "Error",
     language: "Language",
     theme: "Theme",
     themeSystem: "System",
@@ -236,6 +283,7 @@ const copy = {
 
 const EMBED_HINTS = ["embed", "embedding", "bge", "e5", "nomic-embed", "gte", "instructor"];
 const SUPPORTED_EXTS = ["pdf", "txt", "md", "markdown", "docx"];
+const OLLAMA_URL = "https://ollama.com/download";
 
 function isEmbeddingModel(name: string) {
   const lower = name.toLowerCase();
@@ -276,6 +324,13 @@ function deriveTitle(messages: ChatMessage[], fallback: string) {
   return firstUser.text.slice(0, 48);
 }
 
+function getMissingModels(models: string[], defaults: { chat: string; embed: string }) {
+  const missing: string[] = [];
+  if (!models.includes(defaults.chat)) missing.push(defaults.chat);
+  if (!models.includes(defaults.embed)) missing.push(defaults.embed);
+  return missing;
+}
+
 export default function App() {
   const [lang, setLang] = useState<Lang>(() => {
     const saved = localStorage.getItem(STORAGE_KEYS.lang);
@@ -287,6 +342,22 @@ export default function App() {
     if (saved === "light" || saved === "dark" || saved === "system") return saved;
     return "system";
   });
+
+  const [setupState, setSetupState] = useState<SetupState>("checking");
+  const [setupMessage, setSetupMessage] = useState("");
+  const [setupLogs, setSetupLogs] = useState<string[]>([]);
+  const [setupError, setSetupError] = useState<string | null>(null);
+  const [setupComplete, setSetupComplete] = useState<boolean>(() =>
+    loadJson(STORAGE_KEYS.setupComplete, false),
+  );
+  const [missingModels, setMissingModels] = useState<string[]>([]);
+  const [ollamaRunning, setOllamaRunning] = useState(false);
+  const [setupDefaults, setSetupDefaults] = useState<{ chat: string; embed: string }>({
+    chat: "llama3.1:8b",
+    embed: "qwen3-embedding",
+  });
+  const [watcherInfo, setWatcherInfo] = useState<WatcherStatus | null>(null);
+  const [reindexInfo, setReindexInfo] = useState<ReindexProgress | null>(null);
 
   const [targets, setTargets] = useState<IndexTarget[]>([]);
   const [targetsLoaded, setTargetsLoaded] = useState(false);
@@ -328,6 +399,61 @@ export default function App() {
 
   const t = copy[lang];
 
+  async function startSetup() {
+    setSetupState("running");
+    setSetupMessage(t.setupRunning);
+    setSetupError(null);
+    setSetupLogs([]);
+    try {
+      await invoke("run_setup");
+    } catch (err) {
+      setSetupError(String(err));
+      setSetupState("needs");
+    }
+  }
+
+  async function checkSetup(forceSetupComplete = setupComplete) {
+    setSetupError(null);
+    setSetupMessage("");
+    setSetupState("checking");
+    setSetupLogs([]);
+    try {
+      const status = (await invoke("setup_status")) as SetupStatus;
+      setOllamaRunning(status.running);
+      const defaults = { chat: status.defaultChat, embed: status.defaultEmbed };
+      setSetupDefaults(defaults);
+
+      if (!status.running) {
+        setMissingModels(getMissingModels([], defaults));
+        setSetupState("needs");
+        return;
+      }
+
+      const missing = getMissingModels(status.models, defaults);
+      setMissingModels(missing);
+
+      if (!forceSetupComplete && missing.length > 0) {
+        await startSetup();
+        return;
+      }
+
+      if (!forceSetupComplete && missing.length === 0) {
+        setSetupComplete(true);
+      }
+
+      setSetupState("ready");
+    } catch (err) {
+      setSetupError(String(err));
+      setSetupState("needs");
+    }
+  }
+
+  function rerunSetup() {
+    setSetupComplete(false);
+    setSetupLogs([]);
+    checkSetup(false);
+  }
+
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.lang, lang);
   }, [lang]);
@@ -340,6 +466,14 @@ export default function App() {
       document.documentElement.setAttribute("data-theme", theme);
     }
   }, [theme]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.setupComplete, JSON.stringify(setupComplete));
+  }, [setupComplete]);
+
+  useEffect(() => {
+    checkSetup();
+  }, []);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.indexSettings, JSON.stringify(indexSettings));
@@ -415,12 +549,18 @@ export default function App() {
 
       const embedCandidates = res.filter(isEmbeddingModel);
       const chatCandidates = res.filter((m) => !isEmbeddingModel(m));
+      const defaultChat = setupDefaults.chat || "llama3.1:8b";
+      const defaultEmbed = setupDefaults.embed || "qwen3-embedding";
 
       if (!chatTouched && !chatModel) {
-        setChatModel(chatCandidates[0] ?? res[0] ?? "");
+        setChatModel(
+          res.includes(defaultChat) ? defaultChat : chatCandidates[0] ?? res[0] ?? "",
+        );
       }
       if (!embedTouched && !embedModel) {
-        setEmbedModel(embedCandidates[0] ?? res[0] ?? "");
+        setEmbedModel(
+          res.includes(defaultEmbed) ? defaultEmbed : embedCandidates[0] ?? res[0] ?? "",
+        );
       }
     } catch (err) {
       setModelError(String(err));
@@ -430,8 +570,10 @@ export default function App() {
   }
 
   useEffect(() => {
-    loadModels();
-  }, []);
+    if (setupState === "ready") {
+      loadModels();
+    }
+  }, [setupState]);
 
   useEffect(() => {
     invoke("list_targets")
@@ -498,6 +640,67 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    let unlistenSetup: (() => void) | null = null;
+    let unlistenSetupDone: (() => void) | null = null;
+    let unlistenSetupError: (() => void) | null = null;
+    let unlistenModelPull: (() => void) | null = null;
+    let unlistenWatcher: (() => void) | null = null;
+    let unlistenReindex: (() => void) | null = null;
+
+    listen<SetupProgress>("setup_progress", (event) => {
+      setSetupState("running");
+      setSetupMessage(event.payload.message);
+      setSetupLogs((prev) => [...prev.slice(-200), event.payload.message]);
+    }).then((unlisten) => {
+      unlistenSetup = unlisten;
+    });
+
+    listen<ModelPullProgress>("model_pull_progress", (event) => {
+      const line = `[${event.payload.model}] ${event.payload.line}`;
+      setSetupLogs((prev) => [...prev.slice(-200), line]);
+    }).then((unlisten) => {
+      unlistenModelPull = unlisten;
+    });
+
+    listen<boolean>("setup_done", () => {
+      setSetupComplete(true);
+      setSetupState("ready");
+      setSetupMessage("");
+      setSetupError(null);
+    }).then((unlisten) => {
+      unlistenSetupDone = unlisten;
+    });
+
+    listen<string>("setup_error", (event) => {
+      setSetupError(event.payload);
+      setSetupState("needs");
+    }).then((unlisten) => {
+      unlistenSetupError = unlisten;
+    });
+
+    listen<WatcherStatus>("watcher_status", (event) => {
+      setWatcherInfo(event.payload);
+    }).then((unlisten) => {
+      unlistenWatcher = unlisten;
+    });
+
+    listen<ReindexProgress>("reindex_progress", (event) => {
+      setReindexInfo(event.payload);
+    }).then((unlisten) => {
+      unlistenReindex = unlisten;
+    });
+
+    return () => {
+      unlistenSetup?.();
+      unlistenSetupDone?.();
+      unlistenSetupError?.();
+      unlistenModelPull?.();
+      unlistenWatcher?.();
+      unlistenReindex?.();
+    };
+  }, []);
+
+  useEffect(() => {
     if (targets.length === 0) {
       setPreviewFiles([]);
       setPreviewBusy(false);
@@ -558,7 +761,7 @@ export default function App() {
   }, [previewFiles]);
 
   async function addFolders() {
-    const res = await open({ directory: true, multiple: true });
+    const res = await openDialog({ directory: true, multiple: true });
     if (!res) return;
     const items = Array.isArray(res) ? res : [res];
     setTargets((prev) => {
@@ -572,7 +775,7 @@ export default function App() {
   }
 
   async function addFiles() {
-    const res = await open({
+    const res = await openDialog({
       multiple: true,
       filters: [{ name: "Documents", extensions: SUPPORTED_EXTS }],
     });
@@ -687,6 +890,109 @@ export default function App() {
     return [...sessions].sort((a, b) => b.createdAt - a.createdAt);
   }, [sessions]);
 
+  const watcherLabel = watcherInfo?.status === "watching" ? t.watcherWatching : watcherInfo?.status;
+  const reindexLabel = reindexInfo
+    ? reindexInfo.status === "queued"
+      ? t.reindexQueued
+      : reindexInfo.status === "done"
+        ? t.reindexDone
+        : reindexInfo.status === "error"
+          ? t.reindexError
+          : reindexInfo.status
+    : "";
+  const setupStatusText =
+    setupState === "checking"
+      ? t.setupChecking
+      : setupState === "running"
+        ? t.setupRunning
+        : !ollamaRunning
+          ? t.ollamaNotRunning
+          : setupMessage || t.setupReady;
+
+  if (setupState !== "ready") {
+    return (
+      <div className="app">
+        <header className="topbar">
+          <div className="brand">
+            <div className="brand-title">{t.appTitle}</div>
+            <div className="brand-subtitle">{t.appSubtitle}</div>
+          </div>
+          <div className="topbar-controls">
+            <label className="select-field">
+              <span>{t.language}</span>
+              <select value={lang} onChange={(e) => setLang(e.target.value as Lang)}>
+                <option value="pl">PL</option>
+                <option value="en">EN</option>
+              </select>
+            </label>
+            <label className="select-field">
+              <span>{t.theme}</span>
+              <select value={theme} onChange={(e) => setTheme(e.target.value as Theme)}>
+                <option value="system">{t.themeSystem}</option>
+                <option value="light">{t.themeLight}</option>
+                <option value="dark">{t.themeDark}</option>
+              </select>
+            </label>
+          </div>
+        </header>
+
+        <div className="setup">
+          <section className="card setup-card">
+            <div className="card-header">
+              <h2>{t.setupTitle}</h2>
+            </div>
+            <div className="hint">{t.setupSubtitle}</div>
+            <div className="setup-status">
+              <div className="status-row">
+                <span className="badge neutral">{setupStatusText}</span>
+              </div>
+              {setupError && (
+                <div className="error">
+                  {t.setupError}: {setupError}
+                </div>
+              )}
+              {!ollamaRunning && <div className="hint">{t.setupHint}</div>}
+            </div>
+
+            <div className="setup-models">
+              <div className="meta">{t.requiredModels}</div>
+              <div className="setup-chips">
+                <span className="badge neutral">{setupDefaults.chat}</span>
+                <span className="badge neutral">{setupDefaults.embed}</span>
+              </div>
+              {missingModels.length > 0 && (
+                <div className="setup-missing">
+                  <div className="meta">{t.missingModels}</div>
+                  <div className="setup-chips">
+                    {missingModels.map((m) => (
+                      <span className="badge warn" key={m}>{m}</span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="card-actions setup-actions">
+              <button className="ghost" onClick={() => openPath(OLLAMA_URL)} disabled={setupState === "running"}>
+                {t.installOllama}
+              </button>
+              <button className="primary" onClick={() => checkSetup()} disabled={setupState === "running"}>
+                {t.retry}
+              </button>
+            </div>
+
+            {setupLogs.length > 0 && (
+              <div className="setup-logs">
+                <div className="meta">{t.setupLogs}</div>
+                <pre>{setupLogs.join("\n")}</pre>
+              </div>
+            )}
+          </section>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="app">
       <header className="topbar">
@@ -695,6 +1001,7 @@ export default function App() {
           <div className="brand-subtitle">{t.appSubtitle}</div>
         </div>
         <div className="topbar-controls">
+          <button className="ghost small" onClick={rerunSetup}>{t.reRunSetup}</button>
           <label className="select-field">
             <span>{t.language}</span>
             <select value={lang} onChange={(e) => setLang(e.target.value as Lang)}>
@@ -942,6 +1249,18 @@ export default function App() {
                 </div>
               )}
               {indexProgress?.file && <div className="file-path">{indexProgress.file}</div>}
+              {watcherInfo && (
+                <div className="status-row">
+                  <span className="status-label">{t.watcherStatus}</span>
+                  <span>{watcherLabel} | {watcherInfo.watched}</span>
+                </div>
+              )}
+              {reindexInfo && (
+                <div className="status-row">
+                  <span className="status-label">{t.reindexStatus}</span>
+                  <span>{reindexLabel} | {reindexInfo.files.length}</span>
+                </div>
+              )}
             </div>
           </section>
 

@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+  cmp::Ordering,
   collections::{HashMap, HashSet},
   fs,
   io::Read,
@@ -18,6 +19,9 @@ use quick_xml::Reader;
 use quick_xml::events::Event;
 use zip::ZipArchive;
 use tauri::Manager;
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use crate::ollama::{ChatMessage, Ollama};
 
@@ -123,11 +127,29 @@ fn app_db_path(app: &AppHandle) -> Result<PathBuf> {
   Ok(dir.join(DB_NAME))
 }
 
-fn vec0_dll_path(app: &AppHandle) -> Result<PathBuf> {
-  if let Ok(p) = app.path().resolve("vec0.dll", BaseDirectory::Resource) {
-    return Ok(p);
+fn vec0_extension_path(app: &AppHandle) -> Result<PathBuf> {
+  let candidates = [
+    "vec0.dll",
+    "vec0.dylib",
+    "libvec0.dylib",
+    "vec0.so",
+    "libvec0.so",
+    "resources/vec0.dll",
+    "resources/vec0.dylib",
+    "resources/libvec0.dylib",
+    "resources/vec0.so",
+    "resources/libvec0.so",
+  ];
+
+  for rel in candidates {
+    if let Ok(p) = app.path().resolve(rel, BaseDirectory::Resource) {
+      if p.exists() {
+        return Ok(p);
+      }
+    }
   }
-  Ok(app.path().resolve("resources/vec0.dll", BaseDirectory::Resource)?)
+
+  anyhow::bail!("sqlite-vec extension not found in bundled resources")
 }
 
 fn open_db(app: &AppHandle) -> Result<Connection> {
@@ -139,7 +161,7 @@ fn open_db(app: &AppHandle) -> Result<Connection> {
      PRAGMA synchronous=NORMAL;"
   )?;
 
-  let vec_path = vec0_dll_path(app)?;
+  let vec_path = vec0_extension_path(app)?;
 
   unsafe {
     let _guard = LoadExtensionGuard::new(&conn)?;
@@ -215,6 +237,7 @@ fn ensure_schema(conn: &Connection, dim: usize, settings: &IndexSettings) -> Res
   if schema_changed {
     conn.execute_batch(
       "DROP TABLE IF EXISTS vec_chunks;
+       DROP TABLE IF EXISTS chunks_fts;
        DELETE FROM chunks;
        DELETE FROM files;
        DELETE FROM meta WHERE key IN ('embedding_dim','chunk_size','chunk_overlap');"
@@ -232,6 +255,11 @@ fn ensure_schema(conn: &Connection, dim: usize, settings: &IndexSettings) -> Res
   conn.execute(
     "INSERT OR REPLACE INTO meta(key,value) VALUES('chunk_overlap', ?)",
     params![settings.chunk_overlap.to_string()],
+  )?;
+
+  conn.execute_batch(
+    "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts
+     USING fts5(text, content='chunks', content_rowid='id');"
   )?;
 
   // vec0 virtual table (sqlite-vec) + cosine, KNN 
@@ -413,10 +441,14 @@ fn split_pages(raw: &str) -> Vec<String> {
 
 fn tesseract_bin_path(app: &AppHandle) -> Option<PathBuf> {
   let candidates = [
+    "tesseract/bin/tesseract.exe",
+    "tesseract/bin/tesseract",
     "tesseract/tesseract.exe",
     "tesseract/tesseract",
     "tesseract.exe",
     "tesseract",
+    "resources/tesseract/bin/tesseract.exe",
+    "resources/tesseract/bin/tesseract",
     "resources/tesseract/tesseract.exe",
     "resources/tesseract/tesseract",
     "resources/tesseract.exe",
@@ -434,7 +466,12 @@ fn tesseract_bin_path(app: &AppHandle) -> Option<PathBuf> {
 }
 
 fn tessdata_dir(app: &AppHandle) -> Option<PathBuf> {
-  let candidates = ["tesseract/tessdata", "resources/tesseract/tessdata"];
+  let candidates = [
+    "tesseract/tessdata",
+    "tesseract/share/tessdata",
+    "resources/tesseract/tessdata",
+    "resources/tesseract/share/tessdata",
+  ];
   for rel in candidates {
     if let Ok(p) = app.path().resolve(rel, BaseDirectory::Resource) {
       if p.exists() {
@@ -445,8 +482,20 @@ fn tessdata_dir(app: &AppHandle) -> Option<PathBuf> {
   None
 }
 
+#[cfg(unix)]
+fn ensure_executable(path: &Path) -> Result<()> {
+  let mut perms = fs::metadata(path)?.permissions();
+  if perms.mode() & 0o111 == 0 {
+    perms.set_mode(0o755);
+    fs::set_permissions(path, perms)?;
+  }
+  Ok(())
+}
+
 fn run_tesseract(app: &AppHandle, path: &Path, settings: &IndexSettings) -> Result<String> {
   let mut cmd = if let Some(bin) = tesseract_bin_path(app) {
+    #[cfg(unix)]
+    let _ = ensure_executable(&bin);
     Command::new(bin)
   } else {
     Command::new("tesseract")
@@ -535,14 +584,64 @@ fn extract_text_for_document(app: &AppHandle, doc: &DocumentCandidate, settings:
       Ok(vec![clean_text(&text)])
     }
     DocumentKind::Txt | DocumentKind::Md => {
-      let raw = fs::read_to_string(&doc.path)?;
-      Ok(vec![clean_text(&raw)])
+      let raw = fs::read(&doc.path)?;
+      let text = String::from_utf8_lossy(&raw).to_string();
+      Ok(vec![clean_text(&text)])
     }
   }
 }
 
 fn detect_lang_code(text: &str) -> Option<String> {
   detect(text).map(|i| i.lang().code().to_string())
+}
+
+fn sanitize_fts_token(token: &str) -> String {
+  token
+    .chars()
+    .filter(|c| c.is_alphanumeric())
+    .collect()
+}
+
+fn build_fts_query(input: &str) -> Option<String> {
+  let tokens: Vec<String> = input
+    .split_whitespace()
+    .map(sanitize_fts_token)
+    .filter(|t| t.len() > 1)
+    .map(|t| format!("{t}*"))
+    .collect();
+  if tokens.is_empty() {
+    None
+  } else {
+    Some(tokens.join(" "))
+  }
+}
+
+fn fetch_fts_ranks(conn: &Connection, query: &str, limit: usize) -> HashMap<i64, usize> {
+  let mut ranks = HashMap::new();
+  let mut stmt = match conn.prepare(
+    "SELECT rowid, bm25(chunks_fts) AS score
+     FROM chunks_fts
+     WHERE chunks_fts MATCH ?1
+     ORDER BY score
+     LIMIT ?2",
+  ) {
+    Ok(stmt) => stmt,
+    Err(_) => return ranks,
+  };
+
+  let mut rows = match stmt.query(params![query, limit as i64]) {
+    Ok(rows) => rows,
+    Err(_) => return ranks,
+  };
+
+  let mut idx = 1usize;
+  while let Ok(Some(row)) = rows.next() {
+    if let Ok(id) = row.get::<_, i64>(0) {
+      ranks.insert(id, idx);
+      idx += 1;
+    }
+  }
+  ranks
 }
 
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
@@ -707,6 +806,7 @@ fn index_documents(
 
     let tx = conn.transaction()?;
     tx.execute("DELETE FROM vec_chunks WHERE rowid IN (SELECT id FROM chunks WHERE file_path=?1)", params![file_str])?;
+    tx.execute("DELETE FROM chunks_fts WHERE rowid IN (SELECT id FROM chunks WHERE file_path=?1)", params![file_str])?;
     tx.execute("DELETE FROM chunks WHERE file_path=?1", params![file_str])?;
     tx.execute(
       "INSERT OR REPLACE INTO files(path, kind, hash, size, mtime, indexed_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
@@ -731,6 +831,10 @@ fn index_documents(
           params![&file_str, page, chunk_index, lang, text]
         )?;
         let id = tx.last_insert_rowid();
+        tx.execute(
+          "INSERT INTO chunks_fts(rowid, text) VALUES(?1, ?2)",
+          params![id, text]
+        )?;
 
         let emb_json = serde_json::to_string(&emb)?;
         tx.execute(
@@ -842,7 +946,7 @@ pub fn chat(app: &AppHandle, question: String, llm_model: String, embed_model: S
        WHERE embedding MATCH vec_f32(?1) AND k = ?2
        ORDER BY distance
      )
-     SELECT c.file_path, c.page, c.text, c.lang, m.distance
+     SELECT c.id, c.file_path, c.page, c.text, c.lang, m.distance
      FROM matches m
      JOIN chunks c ON c.id = m.id
      ORDER BY m.distance;"
@@ -850,6 +954,7 @@ pub fn chat(app: &AppHandle, question: String, llm_model: String, embed_model: S
 
   #[derive(Clone)]
   struct Candidate {
+    id: i64,
     file_path: String,
     page: i32,
     text: String,
@@ -861,11 +966,12 @@ pub fn chat(app: &AppHandle, question: String, llm_model: String, embed_model: S
   let mut candidates: Vec<Candidate> = vec![];
 
   while let Some(r) = rows.next()? {
-    let file_path: String = r.get(0)?;
-    let page: i32 = r.get(1)?;
-    let text: String = r.get(2)?;
-    let lang: Option<String> = r.get(3)?;
-    let distance: f64 = r.get(4)?;
+    let id: i64 = r.get(0)?;
+    let file_path: String = r.get(1)?;
+    let page: i32 = r.get(2)?;
+    let text: String = r.get(3)?;
+    let lang: Option<String> = r.get(4)?;
+    let distance: f64 = r.get(5)?;
 
     if let Some(max_dist) = settings.max_distance {
       if distance > max_dist {
@@ -873,7 +979,7 @@ pub fn chat(app: &AppHandle, question: String, llm_model: String, embed_model: S
       }
     }
 
-    candidates.push(Candidate { file_path, page, text, lang, distance });
+    candidates.push(Candidate { id, file_path, page, text, lang, distance });
   }
 
   let mut filtered = if let Some(ref ql) = q_lang {
@@ -886,6 +992,30 @@ pub fn chat(app: &AppHandle, question: String, llm_model: String, embed_model: S
   } else {
     candidates
   };
+
+  if let Some(fts_query) = build_fts_query(&question) {
+    if has_table(&conn, "chunks_fts")? {
+      let fts_ranks = fetch_fts_ranks(&conn, &fts_query, candidate_k as usize);
+      if !fts_ranks.is_empty() {
+        let rrf_k = 60.0f64;
+        let mut scored: Vec<(Candidate, f64)> = filtered
+          .iter()
+          .cloned()
+          .enumerate()
+          .map(|(idx, c)| {
+            let v_rank = idx + 1;
+            let mut score = 1.0 / (rrf_k + v_rank as f64);
+            if let Some(f_rank) = fts_ranks.get(&c.id) {
+              score += 1.0 / (rrf_k + *f_rank as f64);
+            }
+            (c, score)
+          })
+          .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+        filtered = scored.into_iter().map(|(c, _)| c).collect();
+      }
+    }
+  }
 
   let top_k = settings.top_k.max(1) as usize;
   if filtered.len() > top_k && settings.use_mmr {
@@ -951,16 +1081,20 @@ pub fn chat(app: &AppHandle, question: String, llm_model: String, embed_model: S
 
   let mut context_block = String::new();
   for (i, s) in sources.iter().enumerate() {
+    let page = s.page + 1;
     context_block.push_str(&format!(
-      "\n[SOURCE {} | {} | page {}]\n{}\n",
-      i+1, s.file_path, s.page, s.snippet
+      "\n[{}] {} (page {})\n{}\n",
+      i + 1,
+      s.file_path,
+      page,
+      s.snippet
     ));
   }
 
-  let system = "Jestes asystentem RAG. Odpowiadaj tylko na podstawie podanych zrodel. Jesli w zrodlach nie ma odpowiedzi, powiedz wprost, ze nie wiesz. Odpowiadaj w jezyku pytania uzytkownika (PL/EN).";
+  let system = "Jestes asystentem RAG. Odpowiadaj tylko na podstawie podanych zrodel. Jesli w zrodlach nie ma odpowiedzi, powiedz wprost, ze nie wiesz. Cytuj zrodla w nawiasach [1], [2] itd. Odpowiadaj w jezyku pytania uzytkownika (PL/EN).";
 
   let user = format!(
-    "Pytanie:\n{}\n\nZrodla:\n{}\n\nOdpowiedz:",
+    "Pytanie:\n{}\n\nZrodla:\n{}\n\nOdpowiedz (z cytowaniami [1], [2]):",
     question, context_block
   );
 

@@ -1,6 +1,8 @@
 use anyhow::{anyhow, Result};
 use reqwest::blocking::Client;
+use reqwest::Client as AsyncClient;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 const OLLAMA_BASE: &str = "http://localhost:11434/api";
 
@@ -56,15 +58,6 @@ impl Ollama {
   }
 
   pub fn list_models(&self) -> Result<Vec<String>> {
-    #[derive(Deserialize)]
-    struct TagsResponse {
-      models: Vec<ModelInfo>,
-    }
-    #[derive(Deserialize)]
-    struct ModelInfo {
-      name: String,
-    }
-
     let resp: TagsResponse = self
       .http
       .get(format!("{OLLAMA_BASE}/tags"))
@@ -74,6 +67,31 @@ impl Ollama {
 
     Ok(resp.models.into_iter().map(|m| m.name).collect())
   }
+}
+
+#[derive(Deserialize)]
+struct TagsResponse {
+  models: Vec<ModelInfo>,
+}
+
+#[derive(Deserialize)]
+struct ModelInfo {
+  name: String,
+}
+
+pub async fn list_models_with_timeout(timeout: Duration) -> Result<Vec<String>> {
+  let client = AsyncClient::builder().timeout(timeout).build()?;
+  let resp = client
+    .get(format!("{OLLAMA_BASE}/tags"))
+    .send()
+    .await?
+    .error_for_status()?;
+  let data: TagsResponse = resp.json().await?;
+  Ok(data.models.into_iter().map(|m| m.name).collect())
+}
+
+pub async fn is_running(timeout: Duration) -> bool {
+  list_models_with_timeout(timeout).await.is_ok()
 }
 
 #[derive(Serialize)]
