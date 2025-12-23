@@ -1,6 +1,6 @@
 [package]
 name = "local-files-chat"
-version = "0.1.0"
+version = "1.0.0"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -32,3 +32,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 pdf-extract = "0.10"
 whatlang = "0.18"
 sha2 = "0.10.9"
+notify = "6"
+zip = "0.6"
+quick-xml = "0.31"
