@@ -1,6 +1,4 @@
-[package]
-name = "local-files-chat"
-version = "0.5.0"
+﻿$10.5.0"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -35,3 +33,4 @@ sha2 = "0.10.9"
 notify = "6"
 zip = "0.6"
 quick-xml = "0.31"
+
