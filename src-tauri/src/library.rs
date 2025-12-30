@@ -8,6 +8,7 @@ use std::{
   io::Read,
   path::{Path, PathBuf},
   process::Command,
+  sync::{Mutex, OnceLock},
   time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Emitter};
@@ -556,8 +557,22 @@ fn append_env_path(var: &str, path: &Path) -> String {
   }
 }
 
+fn with_silenced_panic<F, T>(f: F) -> std::thread::Result<T>
+where
+  F: FnOnce() -> T,
+{
+  static PANIC_HOOK_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+  let lock = PANIC_HOOK_LOCK.get_or_init(|| Mutex::new(())).lock().expect("panic hook lock");
+  let prev_hook = std::panic::take_hook();
+  std::panic::set_hook(Box::new(|_| {}));
+  let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+  std::panic::set_hook(prev_hook);
+  drop(lock);
+  result
+}
+
 fn extract_pdf_text(app: &AppHandle, path: &Path, settings: &IndexSettings) -> Result<Vec<String>> {
-  let raw = match std::panic::catch_unwind(|| pdf_extract::extract_text(path)) {
+  let raw = match with_silenced_panic(|| pdf_extract::extract_text(path)) {
     Ok(Ok(text)) => Ok(text),
     Ok(Err(e)) => Err(anyhow::anyhow!(e)),
     Err(_) => Err(anyhow::anyhow!("pdf_extract panicked")),

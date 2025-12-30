@@ -1131,6 +1131,10 @@ export default function App() {
     ? t.indexStatus[indexProgress.status as keyof typeof t.indexStatus] ?? indexProgress.status
     : "";
   const progressCount = indexProgress ? `${indexProgress.current}/${indexProgress.total}` : "";
+  const showWatcher = !!watcherInfo;
+  const watcherText = watcherInfo ? `${watcherLabel} | ${watcherInfo.watched}` : "";
+  const showReindex = !!reindexInfo;
+  const reindexText = reindexInfo ? `${reindexLabel} | ${reindexInfo.files.length}` : "";
 
   useEffect(() => {
     if (sourcesPage > sourcesPageCount - 1) {
@@ -1816,18 +1820,14 @@ export default function App() {
               >
                 {indexProgress?.file ?? ""}
               </div>
-              {watcherInfo && (
-                <div className="status-row">
-                  <span className="status-label">{t.watcherStatus}</span>
-                  <span>{watcherLabel} | {watcherInfo.watched}</span>
-                </div>
-              )}
-              {reindexInfo && (
-                <div className="status-row">
-                  <span className="status-label">{t.reindexStatus}</span>
-                  <span>{reindexLabel} | {reindexInfo.files.length}</span>
-                </div>
-              )}
+              <div className={`status-row ${showWatcher ? "" : "is-hidden"}`} aria-hidden={!showWatcher}>
+                <span className="status-label">{t.watcherStatus}</span>
+                <span>{showWatcher ? watcherText : ""}</span>
+              </div>
+              <div className={`status-row ${showReindex ? "" : "is-hidden"}`} aria-hidden={!showReindex}>
+                <span className="status-label">{t.reindexStatus}</span>
+                <span>{showReindex ? reindexText : ""}</span>
+              </div>
             </div>
           </section>
 
