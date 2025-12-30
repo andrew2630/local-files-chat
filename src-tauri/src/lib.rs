@@ -15,7 +15,45 @@ use tauri::{AppHandle, Manager, State};
 use tauri::Emitter;
 
 const DEFAULT_CHAT_MODEL: &str = "llama3.1:8b";
+const DEFAULT_FAST_CHAT_MODEL: &str = "llama3.2:3b";
 const DEFAULT_EMBED_MODEL: &str = "qwen3-embedding";
+
+fn split_model_tag(name: &str) -> (&str, Option<&str>) {
+  match name.split_once(':') {
+    Some((base, tag)) => (base, Some(tag)),
+    None => (name, None),
+  }
+}
+
+fn model_installed(models: &[String], required: &str) -> bool {
+  let (req_base, req_tag) = split_model_tag(required);
+  models.iter().any(|model| {
+    let (base, tag) = split_model_tag(model);
+    if req_tag.is_some() {
+      model == required || (tag.is_none() && base == req_base)
+    } else {
+      base == req_base
+    }
+  })
+}
+
+fn panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
+  let panic_ref = panic.as_ref();
+  if let Some(s) = panic_ref.downcast_ref::<&str>() {
+    (*s).to_string()
+  } else if let Some(s) = panic_ref.downcast_ref::<String>() {
+    s.clone()
+  } else {
+    "unknown panic".to_string()
+  }
+}
+
+fn run_index_task(task: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+  match std::panic::catch_unwind(std::panic::AssertUnwindSafe(task)) {
+    Ok(result) => result,
+    Err(panic) => Err(format!("index task panicked: {}", panic_message(panic))),
+  }
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -23,31 +61,32 @@ struct SetupStatus {
   running: bool,
   models: Vec<String>,
   default_chat: String,
+  default_fast: String,
   default_embed: String,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SetupProgress {
   stage: String,
   message: String,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ModelPullProgress {
   model: String,
   line: String,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WatcherStatus {
   status: String,
   watched: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ReindexProgress {
   status: String,
@@ -114,6 +153,17 @@ fn emit_setup_progress(app: &AppHandle, stage: &str, message: impl Into<String>)
 
 fn emit_setup_error(app: &AppHandle, message: impl Into<String>) {
   let _ = app.emit("setup_error", message.into());
+}
+
+#[tauri::command]
+fn set_ollama_host(host: String) -> Result<(), String> {
+  let trimmed = host.trim();
+  if trimmed.is_empty() {
+    std::env::remove_var("OLLAMA_BASE_URL");
+  } else {
+    std::env::set_var("OLLAMA_BASE_URL", trimmed);
+  }
+  Ok(())
 }
 
 fn run_ollama_pull(app: &AppHandle, model: &str) -> Result<(), String> {
@@ -203,6 +253,7 @@ fn update_watcher(app: &AppHandle, state: &State<AppState>, targets: &[library::
   let inner = state.inner.clone();
   let app_handle = app.clone();
 
+  let inner_for_watcher = inner.clone();
   let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
     match res {
       Ok(event) => {
@@ -210,15 +261,15 @@ fn update_watcher(app: &AppHandle, state: &State<AppState>, targets: &[library::
         for path in event.paths {
           if !path.is_file() { continue; }
           if !library::is_supported_document(&path) { continue; }
-          if !is_in_targets(&inner, &path) { continue; }
-          if !should_process(&inner, &path) { continue; }
+          if !is_in_targets(&inner_for_watcher, &path) { continue; }
+          if !should_process(&inner_for_watcher, &path) { continue; }
           files.push(path.to_string_lossy().to_string());
         }
 
         if files.is_empty() { return; }
-        let embed_model = inner.last_embed_model.lock().unwrap().clone();
+        let embed_model = inner_for_watcher.last_embed_model.lock().unwrap().clone();
         if embed_model.is_empty() { return; }
-        let settings = inner.last_index_settings.lock().unwrap().clone();
+        let settings = inner_for_watcher.last_index_settings.lock().unwrap().clone();
         let app_for_index = app_handle.clone();
         let app_for_error = app_handle.clone();
         let files_for_done = files.clone();
@@ -234,7 +285,10 @@ fn update_watcher(app: &AppHandle, state: &State<AppState>, targets: &[library::
         tauri::async_runtime::spawn(async move {
           let app_for_error_clone = app_for_error.clone();
           let res = tauri::async_runtime::spawn_blocking(move || {
+            run_index_task(|| {
             library::index_files(&app_for_index, files, embed_model, settings)
+                .map_err(|e| format!("{:#}", e))
+            })
           }).await;
           match res {
             Ok(Ok(())) => {
@@ -332,12 +386,14 @@ async fn setup_status() -> Result<SetupStatus, String> {
       running: true,
       models,
       default_chat: DEFAULT_CHAT_MODEL.to_string(),
+      default_fast: DEFAULT_FAST_CHAT_MODEL.to_string(),
       default_embed: DEFAULT_EMBED_MODEL.to_string(),
     }),
     Err(_) => Ok(SetupStatus {
       running: false,
       models: vec![],
       default_chat: DEFAULT_CHAT_MODEL.to_string(),
+      default_fast: DEFAULT_FAST_CHAT_MODEL.to_string(),
       default_embed: DEFAULT_EMBED_MODEL.to_string(),
     }),
   }
@@ -358,10 +414,13 @@ fn run_setup(app: AppHandle) -> Result<(), String> {
     };
 
     let mut missing = Vec::new();
-    if !models.iter().any(|m| m == DEFAULT_CHAT_MODEL) {
+    if !model_installed(&models, DEFAULT_CHAT_MODEL) {
       missing.push(DEFAULT_CHAT_MODEL.to_string());
     }
-    if !models.iter().any(|m| m == DEFAULT_EMBED_MODEL) {
+    if !model_installed(&models, DEFAULT_FAST_CHAT_MODEL) {
+      missing.push(DEFAULT_FAST_CHAT_MODEL.to_string());
+    }
+    if !model_installed(&models, DEFAULT_EMBED_MODEL) {
       missing.push(DEFAULT_EMBED_MODEL.to_string());
     }
 
@@ -408,13 +467,16 @@ fn start_index(
   let app_for_error = app.clone();
   tauri::async_runtime::spawn(async move {
     let res = tauri::async_runtime::spawn_blocking(move || {
-      library::index_library(app, targets, embed_model, settings)
+      run_index_task(|| {
+        library::index_library(app, targets, embed_model, settings)
+          .map_err(|e| format!("{:#}", e))
+      })
     }).await;
 
     match res {
       Ok(Ok(())) => {}
       Ok(Err(e)) => {
-        let _ = app_for_error.emit("index_error", e.to_string());
+        let _ = app_for_error.emit("index_error", e);
       }
       Err(e) => {
         let _ = app_for_error.emit("index_error", format!("index task join error: {e}"));
@@ -425,14 +487,20 @@ fn start_index(
 }
 
 #[tauri::command]
-fn chat(
+async fn chat(
   app: AppHandle,
   question: String,
   llm_model: String,
   embed_model: String,
   settings: library::RetrievalSettings,
 ) -> Result<library::ChatResult, String> {
-  library::chat(&app, question, llm_model, embed_model, settings).map_err(|e| e.to_string())
+  let app = app.clone();
+  tauri::async_runtime::spawn_blocking(move || {
+    library::chat(&app, question, llm_model, embed_model, settings)
+      .map_err(|e| format!("{:#}", e))
+  })
+  .await
+  .map_err(|e| format!("chat task join error: {e}"))?
 }
 
 #[tauri::command]
@@ -447,10 +515,19 @@ fn reindex_files(
   let app_for_error = app.clone();
   tauri::async_runtime::spawn(async move {
     let res = tauri::async_runtime::spawn_blocking(move || {
-      library::index_files(&app, files, embed_model, settings)
+      run_index_task(|| {
+        library::index_files(&app, files, embed_model, settings)
+          .map_err(|e| format!("{:#}", e))
+      })
     }).await;
-    if let Ok(Err(e)) = res {
-      let _ = app_for_error.emit("index_error", e.to_string());
+    match res {
+      Ok(Ok(())) => {}
+      Ok(Err(e)) => {
+        let _ = app_for_error.emit("index_error", e);
+      }
+      Err(e) => {
+        let _ = app_for_error.emit("index_error", format!("index task join error: {e}"));
+      }
     }
   });
   Ok(())
@@ -458,23 +535,23 @@ fn reindex_files(
 
 #[tauri::command]
 fn preview_index(app: AppHandle, targets: Vec<library::IndexTarget>) -> Result<Vec<library::IndexFilePreview>, String> {
-  library::preview_index(&app, targets).map_err(|e| e.to_string())
+  library::preview_index(&app, targets).map_err(|e| format!("{:#}", e))
 }
 
 #[tauri::command]
 fn list_models() -> Result<Vec<String>, String> {
   let ollama = ollama::Ollama::new();
-  ollama.list_models().map_err(|e| e.to_string())
+  ollama.list_models().map_err(|e| format!("{:#}", e))
 }
 
 #[tauri::command]
 fn list_targets(app: AppHandle) -> Result<Vec<library::IndexTarget>, String> {
-  library::list_targets(&app).map_err(|e| e.to_string())
+  library::list_targets(&app).map_err(|e| format!("{:#}", e))
 }
 
 #[tauri::command]
 fn save_targets(app: AppHandle, state: State<AppState>, targets: Vec<library::IndexTarget>) -> Result<(), String> {
-  library::save_targets(&app, targets.clone()).map_err(|e| e.to_string())?;
+  library::save_targets(&app, targets.clone()).map_err(|e| format!("{:#}", e))?;
   update_watcher(&app, &state, &targets)?;
   Ok(())
 }
@@ -493,6 +570,7 @@ pub fn run() {
       Ok(())
     })
     .invoke_handler(tauri::generate_handler![
+      set_ollama_host,
       setup_status,
       run_setup,
       start_index,

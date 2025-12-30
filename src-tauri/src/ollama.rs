@@ -4,16 +4,26 @@ use reqwest::Client as AsyncClient;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-const OLLAMA_BASE: &str = "http://localhost:11434/api";
+const DEFAULT_OLLAMA_BASE: &str = "http://127.0.0.1:11434/api";
+const DEFAULT_OLLAMA_TIMEOUT_SECS: u64 = 300;
 
 #[derive(Clone)]
 pub struct Ollama {
   http: Client,
+  base: String,
 }
 
 impl Ollama {
   pub fn new() -> Self {
-    Self { http: Client::new() }
+    let http = Client::builder()
+      .timeout(ollama_timeout())
+      .no_proxy()
+      .build()
+      .unwrap_or_else(|_| Client::new());
+    Self {
+      http,
+      base: ollama_base_url(),
+    }
   }
 
   pub fn embed(&self, model: &str, input: impl Into<EmbedInput>) -> Result<Vec<Vec<f32>>> {
@@ -26,7 +36,7 @@ impl Ollama {
     // /api/embed: input może być string albo array stringów 
     let resp: EmbedResponse = self
       .http
-      .post(format!("{OLLAMA_BASE}/embed"))
+      .post(format!("{}/embed", self.base))
       .json(&req)
       .send()?
       .error_for_status()?
@@ -45,7 +55,7 @@ impl Ollama {
     // /api/chat 
     let resp: ChatResponse = self
       .http
-      .post(format!("{OLLAMA_BASE}/chat"))
+      .post(format!("{}/chat", self.base))
       .json(&req)
       .send()?
       .error_for_status()?
@@ -60,7 +70,7 @@ impl Ollama {
   pub fn list_models(&self) -> Result<Vec<String>> {
     let resp: TagsResponse = self
       .http
-      .get(format!("{OLLAMA_BASE}/tags"))
+      .get(format!("{}/tags", self.base))
       .send()?
       .error_for_status()?
       .json()?;
@@ -80,9 +90,10 @@ struct ModelInfo {
 }
 
 pub async fn list_models_with_timeout(timeout: Duration) -> Result<Vec<String>> {
-  let client = AsyncClient::builder().timeout(timeout).build()?;
+  let client = AsyncClient::builder().timeout(timeout).no_proxy().build()?;
+  let base = ollama_base_url();
   let resp = client
-    .get(format!("{OLLAMA_BASE}/tags"))
+    .get(format!("{base}/tags"))
     .send()
     .await?
     .error_for_status()?;
@@ -90,8 +101,41 @@ pub async fn list_models_with_timeout(timeout: Duration) -> Result<Vec<String>> 
   Ok(data.models.into_iter().map(|m| m.name).collect())
 }
 
-pub async fn is_running(timeout: Duration) -> bool {
-  list_models_with_timeout(timeout).await.is_ok()
+fn ollama_base_url() -> String {
+  let from_env = std::env::var("OLLAMA_BASE_URL")
+    .or_else(|_| std::env::var("OLLAMA_HOST"))
+    .ok();
+  match from_env.as_deref() {
+    Some(raw) => normalize_ollama_base(raw),
+    None => DEFAULT_OLLAMA_BASE.to_string(),
+  }
+}
+
+fn normalize_ollama_base(raw: &str) -> String {
+  let trimmed = raw.trim();
+  if trimmed.is_empty() {
+    return DEFAULT_OLLAMA_BASE.to_string();
+  }
+  let mut base = if trimmed.contains("://") {
+    trimmed.to_string()
+  } else {
+    format!("http://{trimmed}")
+  };
+  base = base.trim_end_matches('/').to_string();
+  if base.ends_with("/api") {
+    base
+  } else {
+    format!("{base}/api")
+  }
+}
+
+fn ollama_timeout() -> Duration {
+  let seconds = std::env::var("OLLAMA_TIMEOUT_SECS")
+    .ok()
+    .and_then(|v| v.parse::<u64>().ok())
+    .filter(|v| *v > 0)
+    .unwrap_or(DEFAULT_OLLAMA_TIMEOUT_SECS);
+  Duration::from_secs(seconds)
 }
 
 #[derive(Serialize)]

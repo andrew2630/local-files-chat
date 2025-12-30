@@ -26,3 +26,5 @@ dist-ssr
 node_modules/
 dist/
 src-tauri/target
+src-tauri/resources/tesseract/**
+!src-tauri/resources/tesseract/.keep

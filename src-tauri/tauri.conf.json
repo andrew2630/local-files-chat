@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run prepare-ocr && npm run build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -22,7 +22,7 @@
     }
   },
   "bundle": {
-    "resources": ["resources/vec0.*", "resources/libvec0.*", "resources/tesseract/**"],
+    "resources": ["resources"],
     "windows": {
       "webviewInstallMode": { "type": "offlineInstaller" }
     },

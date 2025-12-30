@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
+    "prepare-ocr": "node scripts/prepare-ocr.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

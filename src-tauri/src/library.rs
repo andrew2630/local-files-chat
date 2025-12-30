@@ -8,7 +8,7 @@ use std::{
   io::Read,
   path::{Path, PathBuf},
   process::Command,
-  time::{SystemTime, UNIX_EPOCH},
+  time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Emitter};
 use tauri::path::BaseDirectory;
@@ -155,6 +155,7 @@ fn vec0_extension_path(app: &AppHandle) -> Result<PathBuf> {
 fn open_db(app: &AppHandle) -> Result<Connection> {
   let db_path = app_db_path(app)?;
   let conn = Connection::open(db_path)?;
+  conn.busy_timeout(Duration::from_secs(10))?;
 
   conn.execute_batch(
     "PRAGMA journal_mode=WAL;
@@ -496,7 +497,23 @@ fn run_tesseract(app: &AppHandle, path: &Path, settings: &IndexSettings) -> Resu
   let mut cmd = if let Some(bin) = tesseract_bin_path(app) {
     #[cfg(unix)]
     let _ = ensure_executable(&bin);
-    Command::new(bin)
+    let mut cmd = Command::new(&bin);
+    if let Some(base) = tesseract_base_dir(&bin) {
+      if cfg!(target_os = "macos") {
+        let lib = base.join("lib");
+        if lib.exists() {
+          let value = append_env_path("DYLD_LIBRARY_PATH", &lib);
+          cmd.env("DYLD_LIBRARY_PATH", value);
+        }
+      } else if cfg!(target_os = "linux") {
+        let lib = base.join("lib");
+        if lib.exists() {
+          let value = append_env_path("LD_LIBRARY_PATH", &lib);
+          cmd.env("LD_LIBRARY_PATH", value);
+        }
+      }
+    }
+    cmd
   } else {
     Command::new("tesseract")
   };
@@ -521,8 +538,33 @@ fn run_tesseract(app: &AppHandle, path: &Path, settings: &IndexSettings) -> Resu
   Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
+fn tesseract_base_dir(bin: &Path) -> Option<PathBuf> {
+  let parent = bin.parent()?;
+  if parent.file_name().and_then(|p| p.to_str()) == Some("bin") {
+    return parent.parent().map(|p| p.to_path_buf());
+  }
+  Some(parent.to_path_buf())
+}
+
+fn append_env_path(var: &str, path: &Path) -> String {
+  let current = std::env::var(var).unwrap_or_default();
+  let value = path.to_string_lossy();
+  if current.is_empty() {
+    value.to_string()
+  } else {
+    format!("{value}:{current}")
+  }
+}
+
 fn extract_pdf_text(app: &AppHandle, path: &Path, settings: &IndexSettings) -> Result<Vec<String>> {
-  let raw = match pdf_extract::extract_text(path) {
+  let raw = match std::panic::catch_unwind(|| pdf_extract::extract_text(path)) {
+    Ok(Ok(text)) => Ok(text),
+    Ok(Err(e)) => Err(anyhow::anyhow!(e)),
+    Err(_) => Err(anyhow::anyhow!("pdf_extract panicked")),
+  }
+  .with_context(|| format!("pdf extract failed for {}", path.display()));
+
+  let raw = match raw {
     Ok(text) => text,
     Err(e) => {
       if settings.ocr_enabled {
@@ -530,7 +572,7 @@ fn extract_pdf_text(app: &AppHandle, path: &Path, settings: &IndexSettings) -> R
           .with_context(|| format!("tesseract OCR failed for {}", path.display()))?;
         return Ok(split_pages(&ocr));
       }
-      return Err(e.into());
+      return Err(e);
     }
   };
 
@@ -593,6 +635,62 @@ fn extract_text_for_document(app: &AppHandle, doc: &DocumentCandidate, settings:
 
 fn detect_lang_code(text: &str) -> Option<String> {
   detect(text).map(|i| i.lang().code().to_string())
+}
+
+fn ollama_embed_batch_size() -> usize {
+  std::env::var("OLLAMA_EMBED_BATCH")
+    .ok()
+    .and_then(|v| v.parse::<usize>().ok())
+    .filter(|v| *v > 0)
+    .unwrap_or(4)
+}
+
+fn is_reqwest_timeout(err: &anyhow::Error) -> bool {
+  err
+    .downcast_ref::<reqwest::Error>()
+    .map(|e| e.is_timeout())
+    .unwrap_or(false)
+}
+
+fn embed_batch_with_retry(ollama: &Ollama, embed_model: &str, batch: &[String]) -> Result<Vec<Vec<f32>>> {
+  let mut attempts = 0;
+  loop {
+    match ollama.embed(embed_model, batch.to_vec()) {
+      Ok(embeds) => return Ok(embeds),
+      Err(err) => {
+        if is_reqwest_timeout(&err) && batch.len() > 1 {
+          let mid = batch.len() / 2;
+          let left = embed_batch_with_retry(ollama, embed_model, &batch[..mid])?;
+          let right = embed_batch_with_retry(ollama, embed_model, &batch[mid..])?;
+          let mut out = left;
+          out.extend(right);
+          return Ok(out);
+        }
+        attempts += 1;
+        if attempts >= 2 {
+          return Err(err);
+        }
+        std::thread::sleep(Duration::from_millis(400));
+      }
+    }
+  }
+}
+
+fn embed_with_batches(ollama: &Ollama, embed_model: &str, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+  if texts.is_empty() {
+    return Ok(vec![]);
+  }
+  let batch_size = ollama_embed_batch_size();
+  let mut out = Vec::with_capacity(texts.len());
+  let mut start = 0;
+  while start < texts.len() {
+    let end = usize::min(start + batch_size, texts.len());
+    let batch: Vec<String> = texts[start..end].iter().cloned().collect();
+    let mut embeds = embed_batch_with_retry(ollama, embed_model, &batch)?;
+    out.append(&mut embeds);
+    start = end;
+  }
+  Ok(out)
 }
 
 fn sanitize_fts_token(token: &str) -> String {
@@ -708,7 +806,7 @@ fn ensure_targets_schema(conn: &Connection) -> Result<()> {
 }
 
 pub fn list_targets(app: &AppHandle) -> Result<Vec<IndexTarget>> {
-  let mut conn = open_db(app)?;
+  let conn = open_db(app)?;
   ensure_targets_schema(&conn)?;
 
   let mut targets = vec![];
@@ -801,8 +899,49 @@ fn index_documents(
       app.emit("index_progress", IndexProgress { current: i + 1, total, file: file_str.clone(), status: "extract".into() })?;
     }
 
-    let pages = extract_text_for_document(app, &doc, settings)
-      .with_context(|| format!("extract failed: {file_str}"))?;
+    let pages = match extract_text_for_document(app, &doc, settings)
+      .with_context(|| format!("extract failed: {file_str}")) {
+      Ok(pages) => pages,
+      Err(e) => {
+        if emit_progress {
+          let _ = app.emit(
+            "index_progress",
+            IndexProgress {
+              current: i + 1,
+              total,
+              file: file_str.clone(),
+              status: "error".into(),
+            },
+          );
+        }
+        eprintln!("index skip {}: {}", file_str, e);
+        continue;
+      }
+    };
+
+    let mut chunk_meta: Vec<(i32, i32, Option<String>)> = Vec::new();
+    let mut chunk_texts: Vec<String> = Vec::new();
+
+    for (pi, page_text) in pages.iter().enumerate() {
+      let chunks = chunk_text(page_text, settings.chunk_size, settings.chunk_overlap);
+      for (ci, ch) in chunks.into_iter().enumerate() {
+        let lang = detect_lang_code(&ch);
+        chunk_meta.push((pi as i32, ci as i32, lang));
+        chunk_texts.push(ch);
+      }
+    }
+
+    let embeds = if chunk_texts.is_empty() {
+      Vec::new()
+    } else {
+      embed_with_batches(&ollama, embed_model, &chunk_texts)?
+    };
+    anyhow::ensure!(
+      embeds.len() == chunk_texts.len(),
+      "Embedding count mismatch: expected {}, got {}",
+      chunk_texts.len(),
+      embeds.len()
+    );
 
     let tx = conn.transaction()?;
     tx.execute("DELETE FROM vec_chunks WHERE rowid IN (SELECT id FROM chunks WHERE file_path=?1)", params![file_str])?;
@@ -813,54 +952,25 @@ fn index_documents(
       params![file_str, doc.kind.as_str(), hash, size, mtime, now_ts()]
     )?;
 
-    let mut pending_meta: Vec<(i32, i32, Option<String>, String)> = vec![];
-    let mut pending_texts: Vec<String> = vec![];
+    for (idx, text) in chunk_texts.iter().enumerate() {
+      let (page, chunk_index, lang) = &chunk_meta[idx];
+      let emb = &embeds[idx];
+      tx.execute(
+        "INSERT INTO chunks(file_path, page, chunk_index, lang, text) VALUES(?1, ?2, ?3, ?4, ?5)",
+        params![&file_str, page, chunk_index, lang, text]
+      )?;
+      let id = tx.last_insert_rowid();
+      tx.execute(
+        "INSERT INTO chunks_fts(rowid, text) VALUES(?1, ?2)",
+        params![id, text]
+      )?;
 
-    let flush = |tx: &rusqlite::Transaction,
-                 ollama: &Ollama,
-                 embed_model: &str,
-                 pending_meta: &mut Vec<(i32, i32, Option<String>, String)>,
-                 pending_texts: &mut Vec<String>| -> Result<()> {
-      if pending_texts.is_empty() { return Ok(()); }
-      let embeds = ollama.embed(embed_model, pending_texts.clone())?;
-
-      for (idx, emb) in embeds.into_iter().enumerate() {
-        let (page, chunk_index, lang, text) = pending_meta[idx].clone();
-        tx.execute(
-          "INSERT INTO chunks(file_path, page, chunk_index, lang, text) VALUES(?1, ?2, ?3, ?4, ?5)",
-          params![&file_str, page, chunk_index, lang, text]
-        )?;
-        let id = tx.last_insert_rowid();
-        tx.execute(
-          "INSERT INTO chunks_fts(rowid, text) VALUES(?1, ?2)",
-          params![id, text]
-        )?;
-
-        let emb_json = serde_json::to_string(&emb)?;
-        tx.execute(
-          "INSERT INTO vec_chunks(rowid, embedding) VALUES(?1, vec_f32(?2))",
-          params![id, emb_json]
-        )?;
-      }
-
-      pending_meta.clear();
-      pending_texts.clear();
-      Ok(())
-    };
-
-    for (pi, page_text) in pages.iter().enumerate() {
-      let chunks = chunk_text(page_text, settings.chunk_size, settings.chunk_overlap);
-      for (ci, ch) in chunks.into_iter().enumerate() {
-        let lang = detect_lang_code(&ch);
-        pending_meta.push((pi as i32, ci as i32, lang, ch.clone()));
-        pending_texts.push(ch);
-
-        if pending_texts.len() >= 16 {
-          flush(&tx, &ollama, embed_model, &mut pending_meta, &mut pending_texts)?;
-        }
-      }
+      let emb_json = serde_json::to_string(emb)?;
+      tx.execute(
+        "INSERT INTO vec_chunks(rowid, embedding) VALUES(?1, vec_f32(?2))",
+        params![id, emb_json]
+      )?;
     }
-    flush(&tx, &ollama, embed_model, &mut pending_meta, &mut pending_texts)?;
     tx.commit()?;
 
     if emit_progress {
@@ -1091,10 +1201,10 @@ pub fn chat(app: &AppHandle, question: String, llm_model: String, embed_model: S
     ));
   }
 
-  let system = "Jestes asystentem RAG. Odpowiadaj tylko na podstawie podanych zrodel. Jesli w zrodlach nie ma odpowiedzi, powiedz wprost, ze nie wiesz. Cytuj zrodla w nawiasach [1], [2] itd. Odpowiadaj w jezyku pytania uzytkownika (PL/EN).";
+  let system = "You are a RAG assistant. Answer only using the provided sources. If the sources do not contain the answer, say you don't know. Cite sources in brackets [1], [2], etc. Respond in the same language as the user's question.";
 
   let user = format!(
-    "Pytanie:\n{}\n\nZrodla:\n{}\n\nOdpowiedz (z cytowaniami [1], [2]):",
+    "Question:\n{}\n\nSources:\n{}\n\nAnswer with citations [1], [2]:",
     question, context_block
   );
 

@@ -1,0 +1,23 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1024" y2="1024" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0F2A43" />
+      <stop offset="1" stop-color="#1F6F8B" />
+    </linearGradient>
+    <linearGradient id="paper" x1="0" y1="200" x2="0" y2="760" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F9FBFD" />
+      <stop offset="1" stop-color="#E6EDF5" />
+    </linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="180" fill="url(#bg)" />
+  <path d="M220 200 H520 L640 320 V720 C640 742 622 760 600 760 H260 C238 760 220 742 220 720 V232 C220 214 234 200 252 200 Z" fill="url(#paper)" />
+  <path d="M520 200 L640 320 H520 Z" fill="#DCE6F1" />
+  <rect x="260" y="360" width="260" height="22" rx="11" fill="#C6D4E3" />
+  <rect x="260" y="410" width="220" height="20" rx="10" fill="#C6D4E3" />
+  <rect x="260" y="460" width="240" height="20" rx="10" fill="#C6D4E3" />
+  <rect x="560" y="600" width="320" height="220" rx="70" fill="#F5C45B" />
+  <path d="M620 820 L560 900 L640 850 Z" fill="#F5C45B" />
+  <circle cx="660" cy="710" r="22" fill="#3E2E14" />
+  <circle cx="720" cy="710" r="22" fill="#3E2E14" />
+  <circle cx="780" cy="710" r="22" fill="#3E2E14" />
+</svg>

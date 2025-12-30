@@ -18,6 +18,7 @@ PL:
 - Gdy Ollama nie działa, zobaczysz ekran „Setup / Dependencies” z przyciskami „Install Ollama” i „Retry”.
 - Po uruchomieniu Ollama aplikacja automatycznie pobierze modele domyślne:
   - Chat: `llama3.1:8b`
+  - Fast RAG: `llama3.2:3b`
   - Embeddings: `qwen3-embedding`
 - Pobranie modeli wymaga internetu tylko raz.
 
@@ -26,6 +27,7 @@ EN:
 - If not, you will see the “Setup / Dependencies” screen with “Install Ollama” and “Retry”.
 - When Ollama is running, the app ensures default models are installed:
   - Chat: `llama3.1:8b`
+  - Fast RAG: `llama3.2:3b`
   - Embeddings: `qwen3-embedding`
 - Model downloads require internet only once.
 
@@ -35,6 +37,20 @@ EN:
 - Bundled resources:
   - sqlite-vec extension: `src-tauri/resources/vec0.dll` (Windows) or `src-tauri/resources/libvec0.dylib` (macOS)
   - Tesseract CLI + tessdata: `src-tauri/resources/tesseract/**`
+
+OCR bundling (one-click installer):
+- Run `npm run prepare-ocr` to download Tesseract + tessdata into `src-tauri/resources/tesseract`.
+- `npx tauri build` runs this automatically (via `beforeBuildCommand`).
+- Windows uses the UB Mannheim Tesseract installer by default (override with `TESSERACT_WIN_URL`).
+- macOS uses Homebrew if available (or set `TESSERACT_DARWIN_DIR` to a custom install).
+- Optional env vars:
+  - `TESSERACT_DIR` (use existing install)
+  - `TESSERACT_WIN_URL` (override Windows installer URL)
+  - `TESSERACT_DARWIN_DIR` (macOS prefix to copy from)
+  - `NO_BREW=1` (disable Homebrew lookup on macOS)
+  - `TESS_LANGS` (default: `eng,pol,osd`)
+  - `TESSDATA_BASE_URL` (default: `tessdata_fast` on GitHub)
+  - `SKIP_TESSERACT=1` (skip OCR setup)
 
 ## Development
 
