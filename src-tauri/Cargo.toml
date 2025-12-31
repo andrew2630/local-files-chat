@@ -1,6 +1,6 @@
-
-    $args[0].Groups[1].Value + $Version + $args[0].Groups[2].Value
-  
+[package]
+name = "local-files-chat"
+version = "0.5.0"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"

@@ -1,9 +1,7 @@
 {
   "name": "local-files-chat",
   "private": true,
-  
-    $args[0].Groups[1].Value + $Version + $args[0].Groups[2].Value
-  ,
+  "version": "0.5.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
