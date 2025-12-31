@@ -32,6 +32,9 @@ jobs:
       - name: Install dependencies (macOS)
         if: matrix.os == 'macos-latest'
         run: npm install --include=optional
+      - name: Ensure Rollup native binary (macOS)
+        if: matrix.os == 'macos-latest'
+        run: npm install --no-save @rollup/rollup-darwin-arm64
       - name: Prepare OCR assets
         run: npm run prepare-ocr
       - name: Build app
