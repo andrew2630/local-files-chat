@@ -13,12 +13,38 @@ $packageJson = Join-Path $root "package.json"
 $tauriConf = Join-Path $root "src-tauri/tauri.conf.json"
 $cargoToml = Join-Path $root "src-tauri/Cargo.toml"
 
+function Write-Utf8NoBom {
+  param([string]$Path, [string]$Content)
+  $encoding = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($Path, $Content, $encoding)
+}
+
+function Replace-VersionMatch {
+  param(
+    [string]$Raw,
+    [string]$Pattern,
+    [string]$Version,
+    [string]$Path
+  )
+  $evaluator = [System.Text.RegularExpressions.MatchEvaluator]{
+    param($match)
+    $match.Groups[1].Value + $Version + $match.Groups[2].Value
+  }
+  $regex = [regex]::new($Pattern)
+  if (!$regex.IsMatch($Raw)) {
+    Write-Error "Failed to update version in $Path"
+    exit 1
+  }
+  $updated = $regex.Replace($Raw, $evaluator, 1)
+  return $updated
+}
+
 function Update-JsonVersion {
   param([string]$Path, [string]$Version)
   if (!(Test-Path $Path)) { return }
   $raw = Get-Content -Path $Path -Raw
-  $updated = [regex]::Replace($raw, '("version"\s*:\s*")[^"]+(")', "`$1$Version`$2", 1)
-  Set-Content -Path $Path -Value $updated -Encoding utf8
+  $updated = Replace-VersionMatch -Raw $raw -Pattern '("version"\s*:\s*")[^"]+(")' -Version $Version -Path $Path
+  Write-Utf8NoBom -Path $Path -Content $updated
 }
 
 function Update-CargoVersion {
@@ -26,8 +52,8 @@ function Update-CargoVersion {
   if (!(Test-Path $Path)) { return }
   $raw = Get-Content -Path $Path -Raw
   $pattern = '(?ms)(^\[package\][\s\S]*?^version\s*=\s*")[^"]+(")'
-  $updated = [regex]::Replace($raw, $pattern, "`$1$Version`$2", 1)
-  Set-Content -Path $Path -Value $updated -Encoding utf8
+  $updated = Replace-VersionMatch -Raw $raw -Pattern $pattern -Version $Version -Path $Path
+  Write-Utf8NoBom -Path $Path -Content $updated
 }
 
 Update-JsonVersion -Path $packageJson -Version $Version
@@ -36,9 +62,17 @@ Update-CargoVersion -Path $cargoToml -Version $Version
 
 git add package.json src-tauri/Cargo.toml src-tauri/tauri.conf.json
 git commit -m "Release v$Version"
-git tag -a "v$Version" -m "Release v$Version"
+
+$tagExists = git tag -l "v$Version"
+if ($tagExists) {
+  Write-Warning "Tag v$Version already exists; skipping tag creation."
+} else {
+  git tag -a "v$Version" -m "Release v$Version"
+}
 git push
-git push --tags
+if (!$tagExists) {
+  git push --tags
+}
 
 npx tauri build
 
@@ -56,14 +90,19 @@ if ($assets.Count -eq 0) {
   exit 1
 }
 
-$releaseExists = $false
-& gh release view "v$Version" *> $null
-if ($LASTEXITCODE -eq 0) { $releaseExists = $true }
-
-if ($releaseExists) {
-  gh release upload "v$Version" $assets --clobber
+$gh = Get-Command gh -ErrorAction SilentlyContinue
+if (!$gh) {
+  Write-Warning "GitHub CLI not found; skipping release upload."
 } else {
-  gh release create "v$Version" $assets --title "v$Version" --notes "Release v$Version"
+  $releaseExists = $false
+  & gh release view "v$Version" *> $null
+  if ($LASTEXITCODE -eq 0) { $releaseExists = $true }
+
+  if ($releaseExists) {
+    gh release upload "v$Version" $assets --clobber
+  } else {
+    gh release create "v$Version" $assets --title "v$Version" --notes "Release v$Version"
+  }
 }
 
 Write-Host "Assets:"

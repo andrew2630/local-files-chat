@@ -1131,6 +1131,16 @@ export default function App() {
     ? t.indexStatus[indexProgress.status as keyof typeof t.indexStatus] ?? indexProgress.status
     : "";
   const progressCount = indexProgress ? `${indexProgress.current}/${indexProgress.total}` : "";
+  const watcherLabel = watcherInfo?.status === "watching" ? t.watcherWatching : watcherInfo?.status;
+  const reindexLabel = reindexInfo
+    ? reindexInfo.status === "queued"
+      ? t.reindexQueued
+      : reindexInfo.status === "done"
+        ? t.reindexDone
+        : reindexInfo.status === "error"
+          ? t.reindexError
+          : reindexInfo.status
+    : "";
   const showWatcher = !!watcherInfo;
   const watcherText = watcherInfo ? `${watcherLabel} | ${watcherInfo.watched}` : "";
   const showReindex = !!reindexInfo;
@@ -1349,16 +1359,6 @@ export default function App() {
     return [...sessions].sort((a, b) => b.createdAt - a.createdAt);
   }, [sessions]);
 
-  const watcherLabel = watcherInfo?.status === "watching" ? t.watcherWatching : watcherInfo?.status;
-  const reindexLabel = reindexInfo
-    ? reindexInfo.status === "queued"
-      ? t.reindexQueued
-      : reindexInfo.status === "done"
-        ? t.reindexDone
-        : reindexInfo.status === "error"
-          ? t.reindexError
-          : reindexInfo.status
-    : "";
   const setupStatusText =
     setupState === "checking"
       ? t.setupChecking
