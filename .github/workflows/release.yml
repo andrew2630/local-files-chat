@@ -35,7 +35,24 @@ jobs:
       - name: Ensure Rollup native binary (macOS)
         if: matrix.os == 'macos-latest'
         run: |
-          node -e "const fs=require('fs'); const lock=JSON.parse(fs.readFileSync('package-lock.json','utf8')); const version=(lock.packages && lock.packages['node_modules/rollup'] && lock.packages['node_modules/rollup'].version) || (lock.dependencies && lock.dependencies.rollup && lock.dependencies.rollup.version); if (!version) { throw new Error('rollup version not found in package-lock.json'); } const arch=process.arch; const pkg=`@rollup/rollup-darwin-${arch}`; console.log(`Installing ${pkg}@${version}`); require('child_process').execSync(`npm install --no-save ${pkg}@${version}`, {stdio:'inherit'});"
+          node <<'NODE'
+          const fs = require('fs');
+          const lock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
+          const version =
+            (lock.packages &&
+              lock.packages['node_modules/rollup'] &&
+              lock.packages['node_modules/rollup'].version) ||
+            (lock.dependencies && lock.dependencies.rollup && lock.dependencies.rollup.version);
+          if (!version) {
+            throw new Error('rollup version not found in package-lock.json');
+          }
+          const arch = process.arch;
+          const pkg = `@rollup/rollup-darwin-${arch}`;
+          console.log(`Installing ${pkg}@${version}`);
+          require('child_process').execSync(`npm install --no-save ${pkg}@${version}`, {
+            stdio: 'inherit',
+          });
+          NODE
       - name: Prepare OCR assets
         run: npm run prepare-ocr
       - name: Build app
