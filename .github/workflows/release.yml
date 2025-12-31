@@ -26,8 +26,12 @@ jobs:
       - name: Install Tesseract (macOS)
         if: matrix.os == 'macos-latest'
         run: brew install tesseract
-      - name: Install dependencies
+      - name: Install dependencies (Windows)
+        if: matrix.os == 'windows-latest'
         run: npm ci
+      - name: Install dependencies (macOS)
+        if: matrix.os == 'macos-latest'
+        run: npm install --include=optional
       - name: Prepare OCR assets
         run: npm run prepare-ocr
       - name: Build app
