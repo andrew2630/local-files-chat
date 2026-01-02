@@ -51,6 +51,7 @@ describe("App integration", () => {
         });
       }
       if (cmd === "list_targets") return Promise.resolve([]);
+      if (cmd === "list_cloud_models") return Promise.resolve([]);
       if (cmd === "set_ollama_host") return Promise.resolve();
       return Promise.resolve(null);
     });
@@ -68,6 +69,7 @@ describe("App integration", () => {
     invokeMock.mockImplementation((cmd) => {
       if (cmd === "setup_status") return Promise.resolve(setupStatusOk);
       if (cmd === "list_models") return Promise.resolve(setupStatusOk.models);
+      if (cmd === "list_cloud_models") return Promise.resolve([]);
       if (cmd === "list_targets") return Promise.resolve([]);
       if (cmd === "preview_index") return Promise.resolve([]);
       if (cmd === "save_targets") return Promise.resolve();
@@ -88,12 +90,13 @@ describe("App integration", () => {
     await user.type(textarea, "What is in the docs?");
     await user.click(sendButton);
 
+    const expectedChatModel = setupStatusOk.defaultFast || setupStatusOk.defaultChat;
     await waitFor(() =>
       expect(invokeMock).toHaveBeenCalledWith(
         "chat_stream",
         expect.objectContaining({
           question: "What is in the docs?",
-          llmModel: "llama3.1:8b",
+          llmModel: expectedChatModel,
           embedModel: "qwen3-embedding",
           settings: expect.objectContaining({ topK: 8 }),
         }),
@@ -110,6 +113,7 @@ describe("App integration", () => {
     invokeMock.mockImplementation((cmd) => {
       if (cmd === "setup_status") return Promise.resolve(setupStatusOk);
       if (cmd === "list_models") return Promise.resolve(setupStatusOk.models);
+      if (cmd === "list_cloud_models") return Promise.resolve([]);
       if (cmd === "list_targets") return Promise.resolve([]);
       if (cmd === "preview_index") return Promise.resolve([]);
       if (cmd === "save_targets") return Promise.resolve();

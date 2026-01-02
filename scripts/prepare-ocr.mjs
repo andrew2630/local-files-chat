@@ -11,6 +11,8 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const RESOURCES_DIR = path.join(ROOT, "src-tauri", "resources", "tesseract");
 const TESSDATA_DIR = path.join(RESOURCES_DIR, "tessdata");
 const CACHE_DIR = path.join(RESOURCES_DIR, "_installer");
+const DOWNLOAD_RETRIES = 2;
+const DOWNLOAD_RETRY_DELAY_MS = 1500;
 
 const SKIP =
   process.env.SKIP_OCR_SETUP === "1" ||
@@ -106,24 +108,65 @@ function copyDirectory(src, dest) {
   fs.cpSync(src, dest, { recursive: true, dereference: true });
 }
 
+function isHttpUrl(value) {
+  return /^https?:\/\//i.test(value);
+}
+
+function isFileUrl(value) {
+  return /^file:\/\//i.test(value);
+}
+
+function resolveLocalInstaller(override) {
+  if (!override) return null;
+  const trimmed = override.trim();
+  if (!trimmed) return null;
+  if (isFileUrl(trimmed)) {
+    try {
+      const filePath = fileURLToPath(trimmed);
+      return fileExists(filePath) ? filePath : null;
+    } catch {
+      return null;
+    }
+  }
+  if (!isHttpUrl(trimmed)) {
+    const candidate = path.isAbsolute(trimmed) ? trimmed : path.resolve(ROOT, trimmed);
+    return fileExists(candidate) ? candidate : null;
+  }
+  return null;
+}
+
 async function installWindowsTesseract(targetDir) {
   const override = process.env.TESSERACT_WIN_URL;
-  const urls = override
-    ? [override]
-    : [
-        "https://github.com/UB-Mannheim/tesseract/releases/latest/download/tesseract-ocr-w64-setup.exe",
-      ];
-  if (!override) {
-    const apiUrl = await resolveWindowsInstallerFromApi();
-    if (apiUrl && !urls.includes(apiUrl)) urls.push(apiUrl);
+  const localInstaller = resolveLocalInstaller(override);
+  if (override && !isHttpUrl(override) && !localInstaller) {
+    throw new Error(`TESSERACT_WIN_URL points to a missing file: ${override}`);
   }
-  fs.mkdirSync(CACHE_DIR, { recursive: true });
-  const installer = path.join(CACHE_DIR, `tesseract-setup-${Date.now()}.exe`);
-  console.log(`Downloading Tesseract: ${urls[0]}`);
-  await downloadWithFallback(urls, installer);
+
+  let installer = localInstaller;
+  let cleanup = false;
+
+  if (!installer) {
+    const urls = override
+      ? [override]
+      : [
+          "https://github.com/UB-Mannheim/tesseract/releases/latest/download/tesseract-ocr-w64-setup.exe",
+        ];
+    if (!override) {
+      const apiUrl = await resolveWindowsInstallerFromApi();
+      if (apiUrl && !urls.includes(apiUrl)) urls.push(apiUrl);
+    }
+    fs.mkdirSync(CACHE_DIR, { recursive: true });
+    installer = path.join(CACHE_DIR, `tesseract-setup-${Date.now()}.exe`);
+    cleanup = true;
+    console.log(`Downloading Tesseract: ${urls[0]}`);
+    await downloadWithFallback(urls, installer);
+  } else {
+    console.log(`Using local Tesseract installer: ${installer}`);
+  }
+
   console.log("Installing Tesseract...");
   await runInstaller(installer, targetDir);
-  fs.rmSync(installer, { force: true });
+  if (cleanup) fs.rmSync(installer, { force: true });
 }
 
 async function installDarwinTesseract(targetDir) {
@@ -160,8 +203,12 @@ async function ensureTessdata(tessdataDir) {
     if (fileExists(target)) continue;
     const url = `${base}/${lang}.traineddata`;
     console.log(`Downloading tessdata: ${lang}`);
-    await downloadToFile(url, target);
+    await downloadToFileWithRetry(url, target);
   }
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function downloadToFile(url, dest, redirects = 0) {
@@ -196,11 +243,26 @@ async function downloadToFile(url, dest, redirects = 0) {
   });
 }
 
+async function downloadToFileWithRetry(url, dest) {
+  let attempts = 0;
+  while (true) {
+    try {
+      await downloadToFile(url, dest);
+      return;
+    } catch (err) {
+      attempts += 1;
+      fs.rmSync(dest, { force: true });
+      if (attempts > DOWNLOAD_RETRIES) throw err;
+      await delay(DOWNLOAD_RETRY_DELAY_MS * attempts);
+    }
+  }
+}
+
 async function downloadWithFallback(urls, dest) {
   const errors = [];
   for (const url of urls) {
     try {
-      await downloadToFile(url, dest);
+      await downloadToFileWithRetry(url, dest);
       return;
     } catch (err) {
       errors.push(err);

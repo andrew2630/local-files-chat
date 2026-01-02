@@ -611,6 +611,11 @@ fn list_models() -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
+fn list_cloud_models() -> Result<Vec<String>, String> {
+  ollama::list_cloud_models().map_err(|e| format!("{:#}", e))
+}
+
+#[tauri::command]
 fn ollama_runtime_status() -> Result<ollama::OllamaRuntimeStatus, String> {
   let ollama = ollama::Ollama::new();
   ollama.runtime_status().map_err(|e| format!("{:#}", e))
@@ -722,6 +727,7 @@ pub fn run() {
       reindex_files,
       preview_index,
       list_models,
+      list_cloud_models,
       ollama_runtime_status,
       start_ollama,
       stop_ollama,

@@ -190,7 +190,8 @@ const copy = {
     chatFinalized: "Finalna",
     chatReady: "Gotowy",
     chatError: "Błąd",
-    modelHint: "Modele są pobierane z lokalnej instancji Ollama.",
+    modelHint: "Modele sa pobierane z lokalnej instancji Ollama. Modele cloud sa widoczne po zalogowaniu.",
+    cloudLabel: "chmura",
     advancedTitle: "Ustawienia zaawansowane",
     advancedToggleShow: "Pokaż ustawienia",
     advancedToggleHide: "Ukryj ustawienia",
@@ -347,7 +348,8 @@ const copy = {
     chatFinalized: "Finalized",
     chatReady: "Ready",
     chatError: "Error",
-    modelHint: "Models are fetched from your local Ollama instance.",
+    modelHint: "Models are fetched from your local Ollama instance. Cloud models appear after you log in.",
+    cloudLabel: "cloud",
     advancedTitle: "Advanced settings",
     advancedToggleShow: "Show settings",
     advancedToggleHide: "Hide settings",
@@ -700,6 +702,7 @@ export default function App() {
   const [previewVersion, setPreviewVersion] = useState(0);
 
   const [models, setModels] = useState<string[]>([]);
+  const [cloudModels, setCloudModels] = useState<string[]>([]);
   const [modelsBusy, setModelsBusy] = useState(false);
   const [modelError, setModelError] = useState<string | null>(null);
   const [chatModel, setChatModel] = useState("");
@@ -744,6 +747,10 @@ export default function App() {
   });
 
   const t = copy[lang];
+  const cloudModelSet = useMemo(() => new Set(cloudModels), [cloudModels]);
+  const modelLabel = (name: string) => (
+    cloudModelSet.has(name) ? `${name} (${t.cloudLabel})` : name
+  );
   const activeSession = useMemo(
     () => sessions.find((s) => s.id === activeSessionId) ?? null,
     [sessions, activeSessionId],
@@ -1046,24 +1053,35 @@ export default function App() {
     setModelError(null);
     try {
       await syncOllamaHost();
-      const res = (await invoke("list_models")) as string[];
-      setModels(res);
+      const localModels = (await invoke("list_models")) as string[];
+      let cloudList: string[] = [];
+      try {
+        cloudList = (await invoke("list_cloud_models")) as string[];
+      } catch {
+        cloudList = [];
+      }
+      const uniqueCloud = Array.from(new Set(cloudList)).filter((m) => !localModels.includes(m));
+      const mergedModels = [...localModels, ...uniqueCloud];
+      setModels(mergedModels);
+      setCloudModels(uniqueCloud);
       markOllamaOk();
       await loadOllamaRuntime(true);
 
-      const embedCandidates = res.filter(isEmbeddingModel);
-      const chatCandidates = res.filter((m) => !isEmbeddingModel(m));
+      const embedCandidates = mergedModels.filter(isEmbeddingModel);
+      const chatCandidates = mergedModels.filter((m) => !isEmbeddingModel(m));
       const defaultChat = setupDefaults.fast || setupDefaults.chat || DEFAULT_CHAT_MODEL;
       const defaultEmbed = setupDefaults.embed || DEFAULT_EMBED_MODEL;
+      const hasDefaultChat = localModels.includes(defaultChat) || uniqueCloud.includes(defaultChat);
+      const hasDefaultEmbed = localModels.includes(defaultEmbed) || uniqueCloud.includes(defaultEmbed);
 
       if (!chatTouched && !chatModel) {
         setChatModel(
-          res.includes(defaultChat) ? defaultChat : chatCandidates[0] ?? res[0] ?? "",
+          hasDefaultChat ? defaultChat : chatCandidates[0] ?? mergedModels[0] ?? "",
         );
       }
       if (!embedTouched && !embedModel) {
         setEmbedModel(
-          res.includes(defaultEmbed) ? defaultEmbed : embedCandidates[0] ?? res[0] ?? "",
+          hasDefaultEmbed ? defaultEmbed : embedCandidates[0] ?? mergedModels[0] ?? "",
         );
       }
     } catch (err) {
@@ -1855,15 +1873,15 @@ export default function App() {
                     ) : (
                       models.map((m) => (
                         <option value={m} key={m}>
-                          {m}
+                          {modelLabel(m)}
                         </option>
                       ))
                     )}
                   </select>
                 </div>
-                <span className="chip" title={embedModel || "-"}>
+                <span className="chip" title={embedModel ? modelLabel(embedModel) : "-"}>
                   {Icons.file}
-                  <span className="chip-text truncate">{embedModel || "-"}</span>
+                  <span className="chip-text truncate">{embedModel ? modelLabel(embedModel) : "-"}</span>
                 </span>
               </div>
               <div
@@ -2450,7 +2468,7 @@ export default function App() {
                 >
                   {models.map((m) => (
                     <option value={m} key={m}>
-                      {m}
+                      {modelLabel(m)}
                     </option>
                   ))}
                 </select>
@@ -2471,7 +2489,7 @@ export default function App() {
                 >
                   {models.map((m) => (
                     <option value={m} key={m}>
-                      {m}
+                      {modelLabel(m)}
                     </option>
                   ))}
                 </select>
@@ -2739,7 +2757,7 @@ export default function App() {
                   >
                     {models.map((m) => (
                       <option value={m} key={m}>
-                        {m}
+                        {modelLabel(m)}
                       </option>
                     ))}
                   </select>
@@ -2756,7 +2774,7 @@ export default function App() {
                   >
                     {models.map((m) => (
                       <option value={m} key={m}>
-                        {m}
+                        {modelLabel(m)}
                       </option>
                     ))}
                   </select>

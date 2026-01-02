@@ -78,7 +78,7 @@ EN:
 - macOS uses Homebrew if available (or set `TESSERACT_DARWIN_DIR` to a custom install).
 - Optional env vars:
   - `TESSERACT_DIR` (use existing install)
-  - `TESSERACT_WIN_URL` (override Windows installer URL)
+  - `TESSERACT_WIN_URL` (override Windows installer URL or local .exe path)
   - `TESSERACT_DARWIN_DIR` (macOS prefix to copy from)
   - `NO_BREW=1` (disable Homebrew lookup on macOS)
   - `TESS_LANGS` (default: `eng,pol,osd`)

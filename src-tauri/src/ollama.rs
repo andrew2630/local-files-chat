@@ -5,11 +5,22 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt;
 use std::io::BufRead;
+use std::path::PathBuf;
 use std::time::Duration;
 
 const DEFAULT_OLLAMA_BASE: &str = "http://127.0.0.1:11434/api";
 const DEFAULT_OLLAMA_TIMEOUT_SECS: u64 = 300;
 const MAX_ERROR_BODY_BYTES: usize = 4096;
+const DEFAULT_OLLAMA_CLOUD_BASE: &str = "https://ollama.com";
+const DEFAULT_OLLAMA_CLOUD_TIMEOUT_SECS: u64 = 10;
+const OLLAMA_CLOUD_BASE_ENV: &str = "OLLAMA_CLOUD_BASE_URL";
+const OLLAMA_CLOUD_MODELS_URL_ENV: &str = "OLLAMA_CLOUD_MODELS_URL";
+const OLLAMA_CLOUD_TOKEN_ENV_VARS: [&str; 4] = [
+  "OLLAMA_CLOUD_TOKEN",
+  "OLLAMA_AUTH_TOKEN",
+  "OLLAMA_TOKEN",
+  "OLLAMA_API_KEY",
+];
 
 #[derive(Debug)]
 pub struct OllamaHttpError {
@@ -266,6 +277,31 @@ pub async fn list_models_with_timeout(timeout: Duration) -> Result<Vec<String>> 
   Ok(data.models.into_iter().map(|m| m.name).collect())
 }
 
+pub fn list_cloud_models() -> Result<Vec<String>> {
+  let Some(token) = load_cloud_token() else {
+    return Ok(Vec::new());
+  };
+  let client = Client::builder().timeout(cloud_timeout()).build()?;
+  for url in cloud_models_urls() {
+    let resp = match client.get(&url).bearer_auth(&token).send() {
+      Ok(resp) => resp,
+      Err(_) => continue,
+    };
+    let status = resp.status();
+    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+      return Ok(Vec::new());
+    }
+    let body = resp.text().unwrap_or_default();
+    if !status.is_success() {
+      continue;
+    }
+    if let Some(models) = parse_cloud_models(&body) {
+      return Ok(models);
+    }
+  }
+  Ok(Vec::new())
+}
+
 fn ollama_base_url() -> String {
   let from_env = std::env::var("OLLAMA_BASE_URL")
     .or_else(|_| std::env::var("OLLAMA_HOST"))
@@ -301,6 +337,216 @@ fn ollama_timeout() -> Duration {
     .filter(|v| *v > 0)
     .unwrap_or(DEFAULT_OLLAMA_TIMEOUT_SECS);
   Duration::from_secs(seconds)
+}
+
+fn cloud_timeout() -> Duration {
+  let seconds = std::env::var("OLLAMA_CLOUD_TIMEOUT_SECS")
+    .ok()
+    .and_then(|v| v.parse::<u64>().ok())
+    .filter(|v| *v > 0)
+    .unwrap_or(DEFAULT_OLLAMA_CLOUD_TIMEOUT_SECS);
+  Duration::from_secs(seconds)
+}
+
+fn cloud_models_urls() -> Vec<String> {
+  if let Ok(raw) = std::env::var(OLLAMA_CLOUD_MODELS_URL_ENV) {
+    let trimmed = raw.trim();
+    if !trimmed.is_empty() {
+      return vec![trimmed.to_string()];
+    }
+  }
+  let base = std::env::var(OLLAMA_CLOUD_BASE_ENV).unwrap_or_else(|_| DEFAULT_OLLAMA_CLOUD_BASE.to_string());
+  let normalized = normalize_cloud_base(&base);
+  let mut bases = vec![normalized.clone()];
+  if !normalized.ends_with("/api") {
+    bases.push(format!("{normalized}/api"));
+  }
+  let mut urls = Vec::new();
+  for base in bases {
+    urls.push(format!("{base}/tags"));
+    urls.push(format!("{base}/models"));
+    urls.push(format!("{base}/me/models"));
+  }
+  urls
+}
+
+fn normalize_cloud_base(raw: &str) -> String {
+  let trimmed = raw.trim();
+  if trimmed.is_empty() {
+    return DEFAULT_OLLAMA_CLOUD_BASE.to_string();
+  }
+  let base = if trimmed.contains("://") {
+    trimmed.to_string()
+  } else {
+    format!("https://{trimmed}")
+  };
+  base.trim_end_matches('/').to_string()
+}
+
+fn load_cloud_token() -> Option<String> {
+  for key in OLLAMA_CLOUD_TOKEN_ENV_VARS {
+    if let Ok(raw) = std::env::var(key) {
+      let trimmed = raw.trim();
+      if !trimmed.is_empty() {
+        return Some(normalize_token(trimmed));
+      }
+    }
+  }
+  let home = home_dir()?;
+  let base = home.join(".ollama");
+  let candidates = [
+    base.join("credentials.json"),
+    base.join("config.json"),
+    base.join("config"),
+    base.join("credentials"),
+    base.join("auth.json"),
+    base.join("token"),
+  ];
+  for path in candidates {
+    if let Ok(raw) = std::fs::read_to_string(&path) {
+      if let Some(token) = parse_token(&raw) {
+        return Some(token);
+      }
+    }
+  }
+  None
+}
+
+fn home_dir() -> Option<PathBuf> {
+  std::env::var("HOME")
+    .or_else(|_| std::env::var("USERPROFILE"))
+    .ok()
+    .map(PathBuf::from)
+}
+
+fn parse_token(raw: &str) -> Option<String> {
+  let trimmed = raw.trim();
+  if trimmed.is_empty() {
+    return None;
+  }
+  if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+    if let Some(token) = extract_token_from_value(&value) {
+      return Some(normalize_token(&token));
+    }
+  }
+  let prefixes = [
+    "token=",
+    "token:",
+    "access_token=",
+    "access_token:",
+    "auth_token=",
+    "auth_token:",
+    "api_key=",
+    "api_key:",
+  ];
+  for line in trimmed.lines() {
+    let line = line.trim();
+    for prefix in prefixes {
+      if let Some(rest) = line.strip_prefix(prefix) {
+        let value = rest.trim();
+        if !value.is_empty() {
+          return Some(normalize_token(value));
+        }
+      }
+    }
+  }
+  if !trimmed.chars().any(|c| c.is_whitespace()) && trimmed.len() > 8 {
+    return Some(normalize_token(trimmed));
+  }
+  None
+}
+
+fn normalize_token(raw: &str) -> String {
+  let trimmed = raw.trim();
+  trimmed
+    .strip_prefix("Bearer ")
+    .or_else(|| trimmed.strip_prefix("bearer "))
+    .unwrap_or(trimmed)
+    .to_string()
+}
+
+fn extract_token_from_value(value: &Value) -> Option<String> {
+  match value {
+    Value::Object(map) => extract_token_from_map(map),
+    Value::Array(items) => {
+      for item in items {
+        if let Some(token) = extract_token_from_value(item) {
+          return Some(token);
+        }
+      }
+      None
+    }
+    _ => None,
+  }
+}
+
+fn extract_token_from_map(map: &serde_json::Map<String, Value>) -> Option<String> {
+  let keys = [
+    "token",
+    "access_token",
+    "accessToken",
+    "id_token",
+    "idToken",
+    "auth_token",
+    "authToken",
+    "api_key",
+    "apiKey",
+  ];
+  for key in keys {
+    if let Some(Value::String(token)) = map.get(key) {
+      let trimmed = token.trim();
+      if !trimmed.is_empty() {
+        return Some(normalize_token(trimmed));
+      }
+    }
+  }
+  for value in map.values() {
+    if let Some(token) = extract_token_from_value(value) {
+      return Some(token);
+    }
+  }
+  None
+}
+
+fn parse_cloud_models(body: &str) -> Option<Vec<String>> {
+  let value: Value = serde_json::from_str(body).ok()?;
+  if let Some(models) = value.get("models").and_then(|v| v.as_array()) {
+    let names = extract_model_names(models);
+    return if names.is_empty() { None } else { Some(names) };
+  }
+  if let Some(models) = value.get("data").and_then(|v| v.as_array()) {
+    let names = extract_model_names(models);
+    return if names.is_empty() { None } else { Some(names) };
+  }
+  if let Some(models) = value.as_array() {
+    let names = extract_model_names(models);
+    return if names.is_empty() { None } else { Some(names) };
+  }
+  None
+}
+
+fn extract_model_names(items: &[Value]) -> Vec<String> {
+  let mut models = Vec::new();
+  for item in items {
+    if let Some(name) = item.as_str() {
+      let trimmed = name.trim();
+      if !trimmed.is_empty() {
+        models.push(trimmed.to_string());
+      }
+      continue;
+    }
+    let Some(obj) = item.as_object() else { continue };
+    for key in ["name", "model", "id", "slug"] {
+      if let Some(Value::String(name)) = obj.get(key) {
+        let trimmed = name.trim();
+        if !trimmed.is_empty() {
+          models.push(trimmed.to_string());
+        }
+        break;
+      }
+    }
+  }
+  models
 }
 
 fn extract_u64(value: &Value, key: &str) -> Option<u64> {
