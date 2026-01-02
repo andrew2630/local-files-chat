@@ -7,7 +7,7 @@ use std::{
   collections::{HashMap, HashSet},
   io::{BufRead, BufReader},
   path::PathBuf,
-  process::{Command, Stdio},
+  process::{Child, Command, Stdio},
   sync::{Arc, Mutex},
   time::{Duration, Instant},
 };
@@ -59,6 +59,7 @@ fn run_index_task(task: impl FnOnce() -> Result<(), String>) -> Result<(), Strin
 #[serde(rename_all = "camelCase")]
 struct SetupStatus {
   running: bool,
+  managed: bool,
   models: Vec<String>,
   default_chat: String,
   default_fast: String,
@@ -93,6 +94,18 @@ struct ReindexProgress {
   files: Vec<String>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OllamaStartResult {
+  status: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OllamaStopResult {
+  status: String,
+}
+
 #[derive(Clone)]
 struct AppState {
   inner: Arc<AppStateInner>,
@@ -106,6 +119,7 @@ struct AppStateInner {
   last_index_settings: Mutex<library::IndexSettings>,
   target_files: Mutex<HashSet<PathBuf>>,
   folder_roots: Mutex<Vec<(PathBuf, bool)>>,
+  ollama_child: Mutex<Option<Child>>,
 }
 
 impl Default for AppState {
@@ -127,6 +141,7 @@ impl Default for AppState {
         last_index_settings: Mutex::new(settings),
         target_files: Mutex::new(HashSet::new()),
         folder_roots: Mutex::new(Vec::new()),
+        ollama_child: Mutex::new(None),
       }),
     }
   }
@@ -217,6 +232,37 @@ fn run_ollama_pull(app: &AppHandle, model: &str) -> Result<(), String> {
     return Err(format!("ollama pull failed for {model}"));
   }
   Ok(())
+}
+
+fn ollama_host_for_serve() -> Option<String> {
+  let raw = std::env::var("OLLAMA_BASE_URL")
+    .or_else(|_| std::env::var("OLLAMA_HOST"))
+    .ok()?;
+  let trimmed = raw.trim();
+  if trimmed.is_empty() {
+    return None;
+  }
+  let without_scheme = trimmed
+    .strip_prefix("http://")
+    .or_else(|| trimmed.strip_prefix("https://"))
+    .unwrap_or(trimmed);
+  let host = without_scheme.split('/').next().unwrap_or(without_scheme).trim();
+  if host.is_empty() { None } else { Some(host.to_string()) }
+}
+
+fn is_ollama_managed(state: &State<AppState>) -> bool {
+  let mut guard = state.inner.ollama_child.lock().unwrap();
+  let Some(mut child) = guard.take() else {
+    return false;
+  };
+  match child.try_wait() {
+    Ok(Some(_)) => false,
+    Ok(None) => {
+      *guard = Some(child);
+      true
+    }
+    Err(_) => false,
+  }
 }
 
 fn should_process(inner: &AppStateInner, path: &PathBuf) -> bool {
@@ -379,11 +425,13 @@ fn update_watcher(app: &AppHandle, state: &State<AppState>, targets: &[library::
 }
 
 #[tauri::command]
-async fn setup_status() -> Result<SetupStatus, String> {
+async fn setup_status(state: State<'_, AppState>) -> Result<SetupStatus, String> {
+  let managed = is_ollama_managed(&state);
   let timeout = Duration::from_secs(2);
   match ollama::list_models_with_timeout(timeout).await {
     Ok(models) => Ok(SetupStatus {
       running: true,
+      managed,
       models,
       default_chat: DEFAULT_CHAT_MODEL.to_string(),
       default_fast: DEFAULT_FAST_CHAT_MODEL.to_string(),
@@ -391,6 +439,7 @@ async fn setup_status() -> Result<SetupStatus, String> {
     }),
     Err(_) => Ok(SetupStatus {
       running: false,
+      managed,
       models: vec![],
       default_chat: DEFAULT_CHAT_MODEL.to_string(),
       default_fast: DEFAULT_FAST_CHAT_MODEL.to_string(),
@@ -562,6 +611,78 @@ fn list_models() -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
+fn ollama_runtime_status() -> Result<ollama::OllamaRuntimeStatus, String> {
+  let ollama = ollama::Ollama::new();
+  ollama.runtime_status().map_err(|e| format!("{:#}", e))
+}
+
+#[tauri::command]
+async fn start_ollama(state: State<'_, AppState>) -> Result<OllamaStartResult, String> {
+  if is_ollama_managed(&state) {
+    return Ok(OllamaStartResult {
+      status: "already_running".to_string(),
+    });
+  }
+
+  let timeout = Duration::from_secs(1);
+  if ollama::list_models_with_timeout(timeout).await.is_ok() {
+    return Ok(OllamaStartResult {
+      status: "already_running".to_string(),
+    });
+  }
+
+  let mut cmd = Command::new("ollama");
+  cmd.arg("serve")
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null());
+  if let Some(host) = ollama_host_for_serve() {
+    cmd.env("OLLAMA_HOST", host);
+  }
+
+  let child = cmd
+    .spawn()
+    .map_err(|e| format!("failed to start ollama: {e}"))?;
+  *state.inner.ollama_child.lock().unwrap() = Some(child);
+
+  Ok(OllamaStartResult {
+    status: "started".to_string(),
+  })
+}
+
+#[tauri::command]
+fn stop_ollama(state: State<'_, AppState>) -> Result<OllamaStopResult, String> {
+  let mut guard = state.inner.ollama_child.lock().unwrap();
+  let Some(mut child) = guard.take() else {
+    return Ok(OllamaStopResult {
+      status: "not_managed".to_string(),
+    });
+  };
+
+  match child.try_wait() {
+    Ok(Some(_)) => {
+      return Ok(OllamaStopResult {
+        status: "not_running".to_string(),
+      });
+    }
+    Ok(None) => {}
+    Err(e) => {
+      return Err(format!("failed to check ollama status: {e}"));
+    }
+  }
+
+  if let Err(e) = child.kill() {
+    *guard = Some(child);
+    return Err(format!("failed to stop ollama: {e}"));
+  }
+  let _ = child.wait();
+
+  Ok(OllamaStopResult {
+    status: "stopped".to_string(),
+  })
+}
+
+#[tauri::command]
 fn list_targets(app: AppHandle) -> Result<Vec<library::IndexTarget>, String> {
   library::list_targets(&app).map_err(|e| format!("{:#}", e))
 }
@@ -601,6 +722,9 @@ pub fn run() {
       reindex_files,
       preview_index,
       list_models,
+      ollama_runtime_status,
+      start_ollama,
+      stop_ollama,
       list_targets,
       save_targets,
       prune_index
@@ -667,6 +791,7 @@ mod tests {
       last_index_settings: Mutex::new(settings),
       target_files: Mutex::new(HashSet::new()),
       folder_roots: Mutex::new(Vec::new()),
+      ollama_child: Mutex::new(None),
     };
 
     let path = PathBuf::from("C:\\temp\\file.txt");

@@ -21,7 +21,8 @@ vi.mock("@tauri-apps/plugin-opener", () => ({
 
 const setupStatusOk = {
   running: true,
-  models: ["llama3.1:8b", "qwen3-embedding"],
+  managed: false,
+  models: ["llama3.1:8b", "llama3.2:3b", "qwen3-embedding"],
   defaultChat: "llama3.1:8b",
   defaultFast: "llama3.2:3b",
   defaultEmbed: "qwen3-embedding",
@@ -42,6 +43,7 @@ describe("App integration", () => {
       if (cmd === "setup_status") {
         return Promise.resolve({
           running: false,
+          managed: false,
           models: [],
           defaultChat: "llama3.1:8b",
           defaultFast: "llama3.2:3b",
@@ -70,7 +72,7 @@ describe("App integration", () => {
       if (cmd === "preview_index") return Promise.resolve([]);
       if (cmd === "save_targets") return Promise.resolve();
       if (cmd === "set_ollama_host") return Promise.resolve();
-      if (cmd === "chat") {
+      if (cmd === "chat_stream") {
         return Promise.resolve({ answer: "Hello from Ollama", sources: [] });
       }
       return Promise.resolve(null);
@@ -88,15 +90,50 @@ describe("App integration", () => {
 
     await waitFor(() =>
       expect(invokeMock).toHaveBeenCalledWith(
-        "chat",
+        "chat_stream",
         expect.objectContaining({
           question: "What is in the docs?",
           llmModel: "llama3.1:8b",
           embedModel: "qwen3-embedding",
+          settings: expect.objectContaining({ topK: 8 }),
         }),
       ),
     );
 
     expect(await screen.findByText("Hello from Ollama")).toBeInTheDocument();
+  });
+
+  it("records chat history titles for new sessions", async () => {
+    localStorage.setItem("setup.complete", "true");
+    const user = userEvent.setup();
+
+    invokeMock.mockImplementation((cmd) => {
+      if (cmd === "setup_status") return Promise.resolve(setupStatusOk);
+      if (cmd === "list_models") return Promise.resolve(setupStatusOk.models);
+      if (cmd === "list_targets") return Promise.resolve([]);
+      if (cmd === "preview_index") return Promise.resolve([]);
+      if (cmd === "save_targets") return Promise.resolve();
+      if (cmd === "set_ollama_host") return Promise.resolve();
+      if (cmd === "chat_stream") {
+        return Promise.resolve({ answer: "Hello from Ollama", sources: [] });
+      }
+      return Promise.resolve(null);
+    });
+
+    render(<App />);
+
+    const textarea = await screen.findByPlaceholderText("Ask about your documents...");
+    const sendButton = screen.getByRole("button", { name: "Send" });
+
+    await waitFor(() => expect(sendButton).toBeEnabled());
+
+    await user.type(textarea, "What is in the docs?");
+    await user.click(sendButton);
+
+    expect(await screen.findByText("Hello from Ollama")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "History" }));
+
+    expect(await screen.findByText("What is in the docs?")).toBeInTheDocument();
   });
 });

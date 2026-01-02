@@ -1,4 +1,5 @@
 ﻿import { useDeferredValue, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { deriveTitle, formatSize, getMissingModels, isEmbeddingModel, loadJson, newId } from "./App.helpers";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -8,12 +9,15 @@ import "./App.css";
 type SourceHit = { file_path: string; page: number; snippet: string; distance: number };
 type ChatResponse = { answer: string; sources: SourceHit[] };
 type IndexProgress = { current: number; total: number; file: string; status: string };
-type SetupStatus = { running: boolean; models: string[]; defaultChat: string; defaultFast: string; defaultEmbed: string };
+type SetupStatus = { running: boolean; managed: boolean; models: string[]; defaultChat: string; defaultFast: string; defaultEmbed: string };
 type SetupProgress = { stage: string; message: string };
 type ModelPullProgress = { model: string; line: string };
 type WatcherStatus = { status: string; watched: number };
 type ReindexProgress = { status: string; files: string[] };
 type SetupState = "checking" | "needs" | "running" | "ready";
+type OllamaRuntimeModel = { name: string; processor: string };
+type OllamaRuntimeStatus = { status: "gpu" | "cpu" | "idle" | "unknown"; models: OllamaRuntimeModel[] };
+type OllamaStartResult = { status: "started" | "already_running" };
 
 type IndexTarget = {
   id: string;
@@ -150,6 +154,14 @@ const copy = {
     ollamaHealth: "Status Ollama",
     ollamaHealthOk: "Połączenie OK",
     ollamaHealthError: "Błąd Ollama",
+    ollamaAccel: "Akceleracja",
+    ollamaAccelChecking: "Sprawdzanie",
+    ollamaAccelGpu: "GPU",
+    ollamaAccelCpu: "CPU",
+    ollamaAccelIdle: "Brak pracy",
+    ollamaAccelUnknown: "Nieznane",
+    startOllama: "Uruchom Ollama",
+    stopOllama: "Zatrzymaj Ollama",
     retrievalTitle: "Ustawienia wyszukiwania",
     topK: "Top K",
     filesTitle: "Pliki do indeksu",
@@ -299,6 +311,14 @@ const copy = {
     ollamaHealth: "Ollama health",
     ollamaHealthOk: "Connection OK",
     ollamaHealthError: "Ollama error",
+    ollamaAccel: "Acceleration",
+    ollamaAccelChecking: "Checking",
+    ollamaAccelGpu: "GPU",
+    ollamaAccelCpu: "CPU",
+    ollamaAccelIdle: "Idle",
+    ollamaAccelUnknown: "Unknown",
+    startOllama: "Start Ollama",
+    stopOllama: "Stop Ollama",
     retrievalTitle: "Search settings",
     topK: "Top K",
     filesTitle: "Files to index",
@@ -384,7 +404,6 @@ const copy = {
   },
 } as const;
 
-const EMBED_HINTS = ["embed", "embedding", "bge", "e5", "nomic-embed", "gte", "instructor"];
 const SUPPORTED_EXTS = ["pdf", "txt", "md", "markdown", "docx"];
 const DEFAULT_CHAT_MODEL = "llama3.1:8b";
 const DEFAULT_FAST_CHAT_MODEL = "llama3.2:3b";
@@ -392,68 +411,8 @@ const DEFAULT_EMBED_MODEL = "qwen3-embedding";
 const OLLAMA_URL = "https://ollama.com/download";
 const DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434";
 const SETUP_MODAL_ANIM_MS = 240;
-
-export function isEmbeddingModel(name: string) {
-  const lower = name.toLowerCase();
-  return EMBED_HINTS.some((hint) => lower.includes(hint));
-}
-
-export function formatSize(bytes: number) {
-  if (!Number.isFinite(bytes) || bytes <= 0) return "";
-  const units = ["B", "KB", "MB", "GB"];
-  let size = bytes;
-  let unit = 0;
-  while (size >= 1024 && unit < units.length - 1) {
-    size /= 1024;
-    unit += 1;
-  }
-  return `${size.toFixed(size >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
-}
-
-export function newId() {
-  return typeof crypto !== "undefined" && "randomUUID" in crypto
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-
-export function loadJson<T>(key: string, fallback: T): T {
-  try {
-    const raw = localStorage.getItem(key);
-    if (!raw) return fallback;
-    return JSON.parse(raw) as T;
-  } catch {
-    return fallback;
-  }
-}
-
-export function deriveTitle(messages: ChatMessage[], fallback: string) {
-  const firstUser = messages.find((m) => m.role === "user");
-  if (!firstUser) return fallback;
-  return firstUser.text.slice(0, 48);
-}
-
-export function splitModelTag(name: string) {
-  const idx = name.lastIndexOf(":");
-  if (idx <= 0 || idx === name.length - 1) return { base: name, tag: null };
-  return { base: name.slice(0, idx), tag: name.slice(idx + 1) };
-}
-
-export function modelInstalled(models: string[], required: string) {
-  const req = splitModelTag(required);
-  return models.some((model) => {
-    const m = splitModelTag(model);
-    if (req.tag) {
-      return model === required || (!m.tag && m.base === req.base);
-    }
-    return m.base === req.base;
-  });
-}
-
-export function getMissingModels(models: string[], defaults: { chat: string; fast: string; embed: string }) {
-  const required = [defaults.chat, defaults.fast, defaults.embed];
-  const missing = required.filter((model) => !modelInstalled(models, model));
-  return Array.from(new Set(missing));
-}
+const OLLAMA_START_DELAY_MS = 800;
+const OLLAMA_STATUS_POLL_MS = 5000;
 
 function extractOllamaError(err: unknown) {
   const raw = String(err ?? "");
@@ -549,10 +508,26 @@ const Icons = {
       <path d="M8 5l10 7-10 7V5Z" fill="currentColor" stroke="none" />
     </Icon>
   ),
+  stop: (
+    <Icon>
+      <rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor" stroke="none" />
+    </Icon>
+  ),
   search: (
     <Icon>
       <circle cx="11" cy="11" r="7" />
       <path d="M20 20l-4-4" />
+    </Icon>
+  ),
+  eye: (
+    <Icon>
+      <path d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6-10-6-10-6Z" />
+      <circle cx="12" cy="12" r="2.5" />
+    </Icon>
+  ),
+  pulse: (
+    <Icon>
+      <path d="M3 12h4l2-4 4 8 2-4h6" />
     </Icon>
   ),
   list: (
@@ -702,6 +677,7 @@ export default function App() {
   );
   const [missingModels, setMissingModels] = useState<string[]>([]);
   const [ollamaRunning, setOllamaRunning] = useState(false);
+  const [ollamaManaged, setOllamaManaged] = useState(false);
   const [setupDefaults, setSetupDefaults] = useState<{ chat: string; fast: string; embed: string }>({
     chat: DEFAULT_CHAT_MODEL,
     fast: DEFAULT_FAST_CHAT_MODEL,
@@ -747,8 +723,16 @@ export default function App() {
   const [ollamaHealth, setOllamaHealth] = useState<{ status: "ok" | "error"; message?: string }>(() => ({
     status: "ok",
   }));
+  const [ollamaRuntime, setOllamaRuntime] = useState<OllamaRuntimeStatus | null>(null);
+  const [ollamaRuntimeBusy, setOllamaRuntimeBusy] = useState(false);
+  const [ollamaRuntimeError, setOllamaRuntimeError] = useState<string | null>(null);
+  const [ollamaStartBusy, setOllamaStartBusy] = useState(false);
+  const [ollamaStartError, setOllamaStartError] = useState<string | null>(null);
+  const [ollamaStopBusy, setOllamaStopBusy] = useState(false);
+  const [ollamaStopError, setOllamaStopError] = useState<string | null>(null);
   const chatLogRef = useRef<HTMLDivElement | null>(null);
   const streamSessionRef = useRef<string | null>(null);
+  const ollamaPollRef = useRef(false);
 
   const [sessions, setSessions] = useState<ChatSession[]>(() =>
     loadJson(STORAGE_KEYS.sessions, [] as ChatSession[]),
@@ -777,6 +761,89 @@ export default function App() {
     }
   }
 
+  async function loadOllamaRuntime(nextRunning = ollamaRunning) {
+    if (!nextRunning) {
+      setOllamaRuntime(null);
+      setOllamaRuntimeError(null);
+      return;
+    }
+    setOllamaRuntimeBusy(true);
+    setOllamaRuntimeError(null);
+    try {
+      await syncOllamaHost();
+      const status = (await invoke("ollama_runtime_status")) as OllamaRuntimeStatus;
+      setOllamaRuntime(status);
+    } catch (err) {
+      setOllamaRuntimeError(String(err));
+      setOllamaRuntime({ status: "unknown", models: [] });
+    } finally {
+      setOllamaRuntimeBusy(false);
+    }
+  }
+
+  async function startOllama() {
+    if (ollamaStartBusy) return;
+    setOllamaStartBusy(true);
+    setOllamaStartError(null);
+    try {
+      await syncOllamaHost();
+      const res = (await invoke("start_ollama")) as OllamaStartResult;
+      if (res.status === "already_running") {
+        await checkSetup();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, OLLAMA_START_DELAY_MS));
+      await checkSetup();
+    } catch (err) {
+      setOllamaStartError(String(err));
+      setSetupError(String(err));
+    } finally {
+      setOllamaStartBusy(false);
+    }
+  }
+
+  async function stopOllama() {
+    if (ollamaStopBusy) return;
+    setOllamaStopBusy(true);
+    setOllamaStopError(null);
+    try {
+      await syncOllamaHost();
+      await invoke("stop_ollama");
+      await new Promise((resolve) => setTimeout(resolve, OLLAMA_START_DELAY_MS));
+      await checkSetup();
+    } catch (err) {
+      setOllamaStopError(String(err));
+      setSetupError(String(err));
+    } finally {
+      setOllamaStopBusy(false);
+    }
+  }
+
+  async function pollOllamaStatus() {
+    if (ollamaPollRef.current) return;
+    ollamaPollRef.current = true;
+    try {
+      await syncOllamaHost();
+      const status = (await invoke("setup_status")) as SetupStatus;
+      setOllamaRunning(status.running);
+      setOllamaManaged(status.managed);
+      const defaults = { chat: status.defaultChat, fast: status.defaultFast, embed: status.defaultEmbed };
+      setSetupDefaults(defaults);
+      if (status.running) {
+        markOllamaOk();
+      }
+      await loadOllamaRuntime(status.running);
+    } catch (err) {
+      setOllamaRunning(false);
+      setOllamaManaged(false);
+      setOllamaRuntime(null);
+      setOllamaRuntimeError(String(err));
+      setOllamaHealth({ status: "error", message: String(err) });
+    } finally {
+      ollamaPollRef.current = false;
+    }
+  }
+
   async function startSetup() {
     setSetupState("running");
     setSetupMessage(t.setupRunning);
@@ -789,6 +856,9 @@ export default function App() {
     } catch (err) {
       setSetupError(String(err));
       markOllamaError(err);
+      setOllamaRunning(false);
+      setOllamaManaged(false);
+      setOllamaRuntime(null);
       setSetupState("needs");
     }
   }
@@ -807,6 +877,8 @@ export default function App() {
     setSetupMessage("");
     setSetupState("checking");
     setSetupLogs([]);
+    setOllamaStartError(null);
+    setOllamaStopError(null);
     try {
       await syncOllamaHost();
       const status = (await invoke("setup_status")) as SetupStatus;
@@ -814,8 +886,10 @@ export default function App() {
         markOllamaOk();
       }
       setOllamaRunning(status.running);
+      setOllamaManaged(status.managed);
       const defaults = { chat: status.defaultChat, fast: status.defaultFast, embed: status.defaultEmbed };
       setSetupDefaults(defaults);
+      await loadOllamaRuntime(status.running);
 
       if (!status.running) {
         setMissingModels(getMissingModels([], defaults));
@@ -888,12 +962,28 @@ export default function App() {
   }, [ollamaHost]);
 
   useEffect(() => {
+    if (!ollamaRunning) {
+      setOllamaRuntime(null);
+      setOllamaRuntimeError(null);
+      setOllamaManaged(false);
+    }
+  }, [ollamaRunning]);
+
+  useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.setupComplete, JSON.stringify(setupComplete));
   }, [setupComplete]);
 
   useEffect(() => {
     checkSetup();
   }, []);
+
+  useEffect(() => {
+    pollOllamaStatus();
+    const timer = window.setInterval(() => {
+      pollOllamaStatus();
+    }, OLLAMA_STATUS_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [ollamaHost]);
 
   useEffect(() => {
     if (setupState !== "ready") {
@@ -959,6 +1049,7 @@ export default function App() {
       const res = (await invoke("list_models")) as string[];
       setModels(res);
       markOllamaOk();
+      await loadOllamaRuntime(true);
 
       const embedCandidates = res.filter(isEmbeddingModel);
       const chatCandidates = res.filter((m) => !isEmbeddingModel(m));
@@ -1230,7 +1321,46 @@ export default function App() {
     ? t.indexStatus[indexProgress.status as keyof typeof t.indexStatus] ?? indexProgress.status
     : "";
   const progressCount = indexProgress ? `${indexProgress.current}/${indexProgress.total}` : "";
+  const progressClass = !indexProgress
+    ? "neutral"
+    : indexProgress.status === "done"
+      ? "ready"
+      : indexProgress.status === "missing"
+        ? "warn"
+        : indexProgress.status === "skip"
+          ? "neutral"
+          : "info";
+  const progressIcon = !indexProgress
+    ? Icons.info
+    : indexProgress.status === "done"
+      ? Icons.check
+      : indexProgress.status === "missing"
+        ? Icons.alert
+        : indexProgress.status === "skip"
+          ? Icons.info
+          : Icons.pulse;
+  const progressTitle = progressStatus
+    ? `${t.progress}: ${progressStatus}${progressCount ? ` (${progressCount})` : ""}`
+    : t.progress;
   const watcherLabel = watcherInfo?.status === "watching" ? t.watcherWatching : watcherInfo?.status;
+  const watcherCount = watcherInfo?.watched ?? 0;
+  const watcherClass = watcherInfo
+    ? watcherInfo.status === "watching"
+      ? "ready"
+      : watcherInfo.status === "error"
+        ? "error"
+        : "info"
+    : "neutral";
+  const watcherIcon = watcherInfo
+    ? watcherInfo.status === "watching"
+      ? Icons.eye
+      : watcherInfo.status === "error"
+        ? Icons.alert
+        : Icons.search
+    : Icons.eye;
+  const watcherTitle = watcherInfo
+    ? `${t.watcherStatus}: ${watcherLabel}${typeof watcherCount === "number" ? ` (${watcherCount})` : ""}`
+    : t.watcherStatus;
   const reindexLabel = reindexInfo
     ? reindexInfo.status === "queued"
       ? t.reindexQueued
@@ -1240,10 +1370,28 @@ export default function App() {
           ? t.reindexError
           : reindexInfo.status
     : "";
+  const reindexCount = reindexInfo?.files.length ?? 0;
+  const reindexClass = reindexInfo
+    ? reindexInfo.status === "done"
+      ? "ready"
+      : reindexInfo.status === "error"
+        ? "error"
+        : reindexInfo.status === "queued"
+          ? "warn"
+          : "info"
+    : "neutral";
+  const reindexIcon = reindexInfo
+    ? reindexInfo.status === "done"
+      ? Icons.check
+      : reindexInfo.status === "error"
+        ? Icons.alert
+        : Icons.refresh
+    : Icons.refresh;
+  const reindexTitle = reindexInfo
+    ? `${t.reindexStatus}: ${reindexLabel}${typeof reindexCount === "number" ? ` (${reindexCount})` : ""}`
+    : t.reindexStatus;
   const showWatcher = !!watcherInfo;
-  const watcherText = watcherInfo ? `${watcherLabel} | ${watcherInfo.watched}` : "";
   const showReindex = !!reindexInfo;
-  const reindexText = reindexInfo ? `${reindexLabel} | ${reindexInfo.files.length}` : "";
 
   useEffect(() => {
     if (sourcesPage > sourcesPageCount - 1) {
@@ -1421,6 +1569,7 @@ export default function App() {
       updateLastAssistant(sessionId, (m) => ({ ...m, text: resp.answer, sources: resp.sources }));
       setChatFinalized(true);
       markOllamaOk();
+      await loadOllamaRuntime(true);
     } catch (err) {
       setChatError(String(err));
       setChatStreaming(false);
@@ -1521,6 +1670,7 @@ export default function App() {
           ? t.ollamaNotRunning
           : setupMessage || t.setupReady;
   const modelsDisabled = modelsBusy || !ollamaRunning;
+  const chatModelDisabled = modelsDisabled || models.length === 0;
   const advancedToggleLabel = advancedOpen ? t.advancedToggleHide : t.advancedToggleShow;
   const chatStatus = chatBusy
     ? { key: "busy", label: t.chatThinking, icon: Icons.refresh }
@@ -1529,19 +1679,77 @@ export default function App() {
       : { key: "ready", label: t.chatReady, icon: Icons.check };
   const chatStatusTitle = chatError ? `${t.chatError}: ${chatError}` : chatStatus.label;
   const streamStatus = chatStreaming
-    ? { key: "streaming", label: t.chatStreaming }
+    ? { key: "streaming", label: t.chatStreaming, icon: Icons.send }
     : chatFinalized
-      ? { key: "finalized", label: t.chatFinalized }
+      ? { key: "finalized", label: t.chatFinalized, icon: Icons.check }
       : null;
+  const healthStatusIcon = ollamaHealth.status === "ok" ? Icons.check : Icons.alert;
+  const accelStatus = ollamaRuntime?.status ?? "unknown";
+  const accelDetails = ollamaRuntime?.models ?? [];
+  const accelLabel = ollamaRuntimeBusy
+    ? t.ollamaAccelChecking
+    : accelStatus === "gpu"
+      ? t.ollamaAccelGpu
+      : accelStatus === "cpu"
+        ? t.ollamaAccelCpu
+        : accelStatus === "idle"
+          ? t.ollamaAccelIdle
+          : t.ollamaAccelUnknown;
+  const accelClass = ollamaRuntimeBusy
+    ? "busy"
+    : accelStatus === "gpu"
+      ? "ready"
+      : accelStatus === "cpu"
+        ? "warn"
+        : "info";
+  const accelIcon = ollamaRuntimeBusy
+    ? Icons.refresh
+    : accelStatus === "gpu"
+      ? Icons.check
+      : accelStatus === "cpu"
+        ? Icons.info
+        : accelStatus === "idle"
+          ? Icons.info
+          : Icons.alert;
+  const accelTooltipLines = ollamaRuntimeError
+    ? [ollamaRuntimeError]
+    : accelDetails.length > 0
+      ? accelDetails.map((m) => `${m.name} - ${m.processor || t.ollamaAccelUnknown}`)
+      : [accelLabel];
+  const accelAria = `${t.ollamaAccel}: ${accelLabel}`;
   const healthTitle =
     ollamaHealth.status === "error"
-      ? ollamaHealth.message || t.ollamaHealthError
-      : t.ollamaHealthOk;
+      ? `${t.ollamaHealth}: ${ollamaHealth.message || t.ollamaHealthError}`
+      : `${t.ollamaHealth}: ${t.ollamaHealthOk}`;
   const showSetupDownload = setupState === "running";
-  const setupDownloadLabel = setupMessage || t.setupRunning;
+  const setupDownloadLabel = t.setupRunning;
+  const setupDownloadTitle = setupMessage ? `${t.setupRunning}: ${setupMessage}` : t.setupRunning;
   const deleteSession = deleteDialog.sessionId
     ? sessions.find((s) => s.id === deleteDialog.sessionId) ?? null
     : null;
+  const accelTooltip = (
+    <div className="status-tooltip" role="tooltip">
+      <div className="tooltip-title">{t.ollamaAccel}</div>
+      {accelTooltipLines.map((line, idx) => (
+        <div className="tooltip-line" key={`${line}-${idx}`}>{line}</div>
+      ))}
+    </div>
+  );
+
+  function renderAccelStatus(compact: boolean) {
+    if (!ollamaRunning) return null;
+    const rowClass = `health-row${compact ? " health-compact" : ""} has-tooltip`;
+    return (
+      <div className={rowClass} tabIndex={0} aria-label={accelAria}>
+        <span className="health-label">{t.ollamaAccel}</span>
+        <span className={`status-pill ${accelClass} icon-only`}>
+          {accelIcon}
+          <span className="label">{accelAria}</span>
+        </span>
+        {accelTooltip}
+      </div>
+    );
+  }
 
   return (
     <div className="app">
@@ -1557,18 +1765,21 @@ export default function App() {
         </div>
         <div className="topbar-actions">
           {(ollamaRunning || ollamaHealth.status === "error") && (
-            <div className="health-row health-compact" title={healthTitle}>
+            <div className="health-row health-compact">
               <span className="health-label">{t.ollamaHealth}</span>
-              <span className={`status-pill ${ollamaHealth.status === "ok" ? "ready" : "error"}`}>
-                <span className="status-text">
-                  {ollamaHealth.status === "ok" ? t.ollamaHealthOk : t.ollamaHealthError}
-                </span>
+              <span
+                className={`status-pill ${ollamaHealth.status === "ok" ? "ready" : "error"} icon-only`}
+                title={healthTitle}
+              >
+                {healthStatusIcon}
+                <span className="label">{healthTitle}</span>
               </span>
             </div>
           )}
+          {renderAccelStatus(true)}
           {showSetupDownload && (
             <div className="download-status">
-              <div className="status-pill busy" title={setupDownloadLabel}>
+              <div className="status-pill busy" title={setupDownloadTitle}>
                 {Icons.refresh}
                 <span className="status-text truncate">{setupDownloadLabel}</span>
               </div>
@@ -1627,27 +1838,51 @@ export default function App() {
             </div>
             <div className="chat-meta">
               <div className="model-chips">
-                <span className="chip" title={chatModel || "-"}>
+                <div className="model-select" title={t.chatModel}>
                   {Icons.chat}
-                  <span className="chip-text truncate">{chatModel || "-"}</span>
-                </span>
+                  <select
+                    id="chat-model-select"
+                    value={models.includes(chatModel) ? chatModel : ""}
+                    onChange={(e) => {
+                      setChatModel(e.target.value);
+                      setChatTouched(true);
+                    }}
+                    disabled={chatModelDisabled}
+                    aria-label={t.chatModel}
+                  >
+                    {models.length === 0 ? (
+                      <option value="">{t.modelsEmpty}</option>
+                    ) : (
+                      models.map((m) => (
+                        <option value={m} key={m}>
+                          {m}
+                        </option>
+                      ))
+                    )}
+                  </select>
+                </div>
                 <span className="chip" title={embedModel || "-"}>
                   {Icons.file}
                   <span className="chip-text truncate">{embedModel || "-"}</span>
                 </span>
               </div>
               <div
-                className={`status-pill ${chatStatus.key}`}
+                className={`status-pill ${chatStatus.key} icon-only`}
                 title={chatStatusTitle}
                 role="status"
                 aria-live="polite"
               >
                 {chatStatus.icon}
-                <span className="status-text">{chatStatus.label}</span>
+                <span className="label">{chatStatusTitle}</span>
               </div>
               {streamStatus && (
-                <div className={`status-pill ${streamStatus.key}`} title={streamStatus.label}>
-                  <span className="status-text">{streamStatus.label}</span>
+                <div
+                  className={`status-pill ${streamStatus.key} icon-only`}
+                  title={streamStatus.label}
+                  aria-label={streamStatus.label}
+                >
+                  {streamStatus.icon}
+                  <span className="label">{streamStatus.label}</span>
                 </div>
               )}
               <button
@@ -1966,8 +2201,15 @@ export default function App() {
             <div className="status compact">
               <div className="status-label">{t.progress}</div>
               <div className={`status-row ${showIndexProgress ? "" : "is-hidden"}`} aria-hidden={!showIndexProgress}>
-                <span className="badge neutral">{showIndexProgress ? progressStatus : t.indexing}</span>
-                <span>{showIndexProgress ? progressCount : ""}</span>
+                <span
+                  className={`status-pill ${progressClass} icon-only`}
+                  title={progressTitle}
+                  aria-label={progressTitle}
+                >
+                  {progressIcon}
+                  <span className="label">{progressTitle}</span>
+                </span>
+                <span className="status-count">{showIndexProgress ? progressCount : ""}</span>
               </div>
               <div
                 className={`progress-bar ${showIndexProgress ? "" : "is-hidden"}`}
@@ -1998,12 +2240,26 @@ export default function App() {
                 {indexProgress?.file ?? ""}
               </div>
               <div className={`status-row ${showWatcher ? "" : "is-hidden"}`} aria-hidden={!showWatcher}>
-                <span className="status-label">{t.watcherStatus}</span>
-                <span>{showWatcher ? watcherText : ""}</span>
+                <span
+                  className={`status-pill ${watcherClass} icon-only`}
+                  title={watcherTitle}
+                  aria-label={watcherTitle}
+                >
+                  {watcherIcon}
+                  <span className="label">{watcherTitle}</span>
+                </span>
+                <span className="status-count">{showWatcher ? watcherCount : ""}</span>
               </div>
               <div className={`status-row ${showReindex ? "" : "is-hidden"}`} aria-hidden={!showReindex}>
-                <span className="status-label">{t.reindexStatus}</span>
-                <span>{showReindex ? reindexText : ""}</span>
+                <span
+                  className={`status-pill ${reindexClass} icon-only`}
+                  title={reindexTitle}
+                  aria-label={reindexTitle}
+                >
+                  {reindexIcon}
+                  <span className="label">{reindexTitle}</span>
+                </span>
+                <span className="status-count">{showReindex ? reindexCount : ""}</span>
               </div>
             </div>
           </section>
@@ -2121,32 +2377,63 @@ export default function App() {
             <div className="settings-section">
               <div className="settings-row">
                 <div className="settings-title">{t.modelsTitle}</div>
-                <button
-                  className="icon-button ghost icon-only"
-                  onClick={loadModels}
-                  disabled={modelsBusy || !ollamaRunning}
-                  aria-label={t.refreshModels}
-                  title={t.refreshModels}
-                >
-                  {Icons.refresh}
-                  <span className="label">{t.refreshModels}</span>
-                </button>
+                <div className="settings-actions">
+                  <button
+                    className="icon-button ghost icon-only"
+                    onClick={loadModels}
+                    disabled={modelsBusy || !ollamaRunning}
+                    aria-label={t.refreshModels}
+                    title={t.refreshModels}
+                  >
+                    {Icons.refresh}
+                    <span className="label">{t.refreshModels}</span>
+                  </button>
+                  {!ollamaRunning && !ollamaManaged && (
+                    <button
+                      className={`icon-button ghost icon-only ${ollamaStartBusy ? "busy" : ""}`}
+                      onClick={startOllama}
+                      disabled={ollamaStartBusy}
+                      aria-label={t.startOllama}
+                      title={t.startOllama}
+                    >
+                      {Icons.play}
+                      <span className="label">{t.startOllama}</span>
+                    </button>
+                  )}
+                  {ollamaManaged && (
+                    <button
+                      className={`icon-button ghost icon-only ${ollamaStopBusy ? "busy" : ""}`}
+                      onClick={stopOllama}
+                      disabled={ollamaStopBusy}
+                      aria-label={t.stopOllama}
+                      title={t.stopOllama}
+                    >
+                      {Icons.stop}
+                      <span className="label">{t.stopOllama}</span>
+                    </button>
+                  )}
+                </div>
               </div>
               <div className="hint">{t.modelHint}</div>
               {!ollamaRunning && <div className="warning">{t.modelsUnavailable}</div>}
+              {!ollamaRunning && ollamaStartError && <div className="error">{ollamaStartError}</div>}
+              {ollamaManaged && ollamaStopError && <div className="error">{ollamaStopError}</div>}
               {ollamaRunning && (
                 <div className="health-row">
                   <span className="health-label">{t.ollamaHealth}</span>
-                  <span className={`status-pill ${ollamaHealth.status === "ok" ? "ready" : "error"}`}>
-                    <span className="status-text">
-                      {ollamaHealth.status === "ok" ? t.ollamaHealthOk : t.ollamaHealthError}
-                    </span>
+                  <span
+                    className={`status-pill ${ollamaHealth.status === "ok" ? "ready" : "error"} icon-only`}
+                    title={healthTitle}
+                  >
+                    {healthStatusIcon}
+                    <span className="label">{healthTitle}</span>
                   </span>
                   {ollamaHealth.status === "error" && ollamaHealth.message && (
                     <span className="health-detail">{ollamaHealth.message}</span>
                   )}
                 </div>
               )}
+              {renderAccelStatus(false)}
               <div className="field">
                 <div className="label-with-help">
                   <label htmlFor="settings-chat-model">{t.chatModel}</label>
@@ -2543,6 +2830,26 @@ export default function App() {
                 {Icons.download}
                 <span>{t.installOllama}</span>
               </button>
+              {!ollamaRunning && !ollamaManaged && (
+                <button
+                  className={`icon-button ghost ${ollamaStartBusy ? "busy" : ""}`}
+                  onClick={startOllama}
+                  disabled={setupState === "running" || ollamaStartBusy}
+                >
+                  {Icons.play}
+                  <span>{t.startOllama}</span>
+                </button>
+              )}
+              {ollamaManaged && (
+                <button
+                  className={`icon-button ghost ${ollamaStopBusy ? "busy" : ""}`}
+                  onClick={stopOllama}
+                  disabled={setupState === "running" || ollamaStopBusy}
+                >
+                  {Icons.stop}
+                  <span>{t.stopOllama}</span>
+                </button>
+              )}
               <button
                 className="icon-button primary"
                 onClick={() => checkSetup()}

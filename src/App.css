@@ -1,6 +1,7 @@
 @import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,400;500;600&display=swap");
 
 :root {
+  color-scheme: light;
   --font-sans: "Space Grotesk", "Segoe UI", sans-serif;
   --font-display: "Newsreader", "Georgia", serif;
   --bg: #f4f4f4;
@@ -19,24 +20,25 @@
   --radius: 18px;
   --scroll-thumb: #b6b6b6;
   --scroll-thumb-hover: #9a9a9a;
-  --badge-neutral-bg: #f2f2f2;
-  --badge-neutral-border: #d8d8d8;
-  --badge-neutral-ink: #111111;
-  --badge-good-bg: #ededed;
-  --badge-good-border: #cfcfcf;
-  --badge-good-ink: #111111;
-  --badge-warn-bg: #e3e3e3;
-  --badge-warn-border: #c2c2c2;
-  --badge-warn-ink: #111111;
-  --badge-info-bg: #f7f7f7;
-  --badge-info-border: #dcdcdc;
-  --badge-info-ink: #111111;
-  --badge-danger-bg: #dedede;
-  --badge-danger-border: #bdbdbd;
-  --badge-danger-ink: #111111;
+  --badge-neutral-bg: #eef0f2;
+  --badge-neutral-border: #d4d8dc;
+  --badge-neutral-ink: #2c2f33;
+  --badge-good-bg: #e8f7ef;
+  --badge-good-border: #8fd6a8;
+  --badge-good-ink: #1b5e3c;
+  --badge-warn-bg: #fff4df;
+  --badge-warn-border: #f0c07b;
+  --badge-warn-ink: #7a4a05;
+  --badge-info-bg: #e8f1ff;
+  --badge-info-border: #9ab8ff;
+  --badge-info-ink: #1e4a8a;
+  --badge-danger-bg: #fde8e8;
+  --badge-danger-border: #f1a1a1;
+  --badge-danger-ink: #8f2a2a;
 }
 
 :root[data-theme="dark"] {
+  color-scheme: dark;
   --bg: #0b0b0b;
   --bg-elev: #121212;
   --bg-soft: #1a1a1a;
@@ -52,21 +54,21 @@
   --shadow-soft: 0 12px 28px rgba(0, 0, 0, 0.35);
   --scroll-thumb: #4a4a4a;
   --scroll-thumb-hover: #5e5e5e;
-  --badge-neutral-bg: #1c1c1c;
-  --badge-neutral-border: #2f2f2f;
-  --badge-neutral-ink: #f4f4f4;
-  --badge-good-bg: #232323;
-  --badge-good-border: #3a3a3a;
-  --badge-good-ink: #f4f4f4;
-  --badge-warn-bg: #262626;
-  --badge-warn-border: #3f3f3f;
-  --badge-warn-ink: #f4f4f4;
-  --badge-info-bg: #1f1f1f;
-  --badge-info-border: #343434;
-  --badge-info-ink: #f4f4f4;
-  --badge-danger-bg: #2a2a2a;
-  --badge-danger-border: #4a4a4a;
-  --badge-danger-ink: #f4f4f4;
+  --badge-neutral-bg: #1b1e22;
+  --badge-neutral-border: #2d333a;
+  --badge-neutral-ink: #d3d8de;
+  --badge-good-bg: #113021;
+  --badge-good-border: #2f7a50;
+  --badge-good-ink: #7be0a2;
+  --badge-warn-bg: #2b1d0b;
+  --badge-warn-border: #7b5a21;
+  --badge-warn-ink: #f5b66b;
+  --badge-info-bg: #0f1d31;
+  --badge-info-border: #2e4a7a;
+  --badge-info-ink: #8db5ff;
+  --badge-danger-bg: #2b1212;
+  --badge-danger-border: #7a2f2f;
+  --badge-danger-ink: #ff9a9a;
 }
 
 * {
@@ -362,6 +364,68 @@ body {
   flex-wrap: wrap;
 }
 
+.model-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-soft);
+  font-size: 12px;
+  color: var(--muted);
+  position: relative;
+}
+
+.model-select::after {
+  content: "";
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+  transform: translateY(-50%) rotate(45deg);
+  pointer-events: none;
+}
+
+.model-select .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.model-select select {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  border: none;
+  padding: 0 16px 0 0;
+  background: transparent;
+  font-size: 12px;
+  color: var(--ink);
+  min-width: 140px;
+  max-width: 240px;
+}
+
+.model-select select:focus {
+  box-shadow: none;
+}
+
+.model-select select:disabled {
+  color: var(--muted);
+}
+
+.model-select select option {
+  background: var(--bg-elev);
+  color: var(--ink);
+}
+
+.model-select:focus-within {
+  border-color: var(--border-strong);
+  box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.08);
+}
+
 .chip {
   display: inline-flex;
   align-items: center;
@@ -401,6 +465,17 @@ body {
   height: 14px;
 }
 
+.status-pill.icon-only {
+  padding: 6px;
+  min-width: 28px;
+  justify-content: center;
+  gap: 0;
+}
+
+.status-pill.icon-only .status-text {
+  display: none;
+}
+
 .status-pill.busy .icon {
   animation: spin 1.2s linear infinite;
 }
@@ -417,10 +492,28 @@ body {
   color: var(--badge-danger-ink);
 }
 
+.status-pill.info {
+  border-color: var(--badge-info-border);
+  background: var(--badge-info-bg);
+  color: var(--badge-info-ink);
+}
+
+.status-pill.neutral {
+  border-color: var(--badge-neutral-border);
+  background: var(--badge-neutral-bg);
+  color: var(--badge-neutral-ink);
+}
+
 .status-pill.ready {
   border-color: var(--badge-good-border);
   background: var(--badge-good-bg);
   color: var(--badge-good-ink);
+}
+
+.status-pill.warn {
+  border-color: var(--badge-warn-border);
+  background: var(--badge-warn-bg);
+  color: var(--badge-warn-ink);
 }
 
 .status-pill.streaming {
@@ -439,6 +532,12 @@ body {
   white-space: nowrap;
 }
 
+.status-count {
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
 .health-row {
   display: flex;
   align-items: center;
@@ -446,6 +545,48 @@ body {
   gap: 8px;
   font-size: 12px;
   color: var(--muted);
+}
+
+.has-tooltip {
+  position: relative;
+  cursor: help;
+}
+
+.status-tooltip {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  min-width: 220px;
+  max-width: 320px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  box-shadow: var(--shadow-soft);
+  opacity: 0;
+  transform: translateY(-4px);
+  pointer-events: none;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  z-index: 10;
+}
+
+.has-tooltip:hover .status-tooltip,
+.has-tooltip:focus-within .status-tooltip {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.tooltip-title {
+  font-weight: 600;
+  color: var(--ink);
+  margin-bottom: 6px;
+}
+
+.tooltip-line {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.4;
+  word-break: break-word;
 }
 
 .health-compact {
@@ -458,6 +599,11 @@ body {
 
 .health-compact .status-pill {
   padding: 4px 8px;
+}
+
+.health-compact .status-pill.icon-only {
+  padding: 6px;
+  min-width: 28px;
 }
 
 .health-label {
@@ -1301,6 +1447,8 @@ textarea:disabled {
 .settings-actions {
   display: flex;
   justify-content: flex-end;
+  gap: 8px;
+  align-items: center;
 }
 
 .modal-backdrop {

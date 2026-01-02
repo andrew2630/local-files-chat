@@ -2,6 +2,7 @@ use anyhow::{anyhow, Result};
 use reqwest::blocking::Client;
 use reqwest::{Client as AsyncClient, StatusCode};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::fmt;
 use std::io::BufRead;
 use std::time::Duration;
@@ -179,6 +180,64 @@ impl Ollama {
 
     Ok(resp.models.into_iter().map(|m| m.name).collect())
   }
+
+  pub fn runtime_status(&self) -> Result<OllamaRuntimeStatus> {
+    let resp = self
+      .http
+      .get(format!("{}/ps", self.base))
+      .send()?;
+    let status = resp.status();
+    if !status.is_success() {
+      let body = truncate_body(&resp.text().unwrap_or_default());
+      return Err(anyhow!(OllamaHttpError { status, body }));
+    }
+    let raw: Value = resp.json()?;
+    let mut models = Vec::new();
+    if let Some(items) = raw.get("models").and_then(|v| v.as_array()) {
+      for item in items {
+        let name = item
+          .get("name")
+          .and_then(|v| v.as_str())
+          .unwrap_or("unknown")
+          .to_string();
+        let size_vram = extract_u64(item, "size_vram").or_else(|| extract_u64(item, "sizeVram"));
+        let size_system = extract_u64(item, "size_system").or_else(|| extract_u64(item, "sizeSystem"));
+        let processor = infer_processor(item, size_vram, size_system);
+        models.push(OllamaRuntimeModel {
+          name,
+          processor,
+          size_vram,
+          size_system,
+        });
+      }
+    }
+
+    let status = if models.is_empty() {
+      "idle".to_string()
+    } else if models.iter().any(|m| is_gpu(&m.processor)) {
+      "gpu".to_string()
+    } else if models.iter().any(|m| is_cpu(&m.processor)) {
+      "cpu".to_string()
+    } else {
+      "unknown".to_string()
+    };
+
+    Ok(OllamaRuntimeStatus { status, models })
+  }
+}
+
+#[derive(Serialize)]
+pub struct OllamaRuntimeModel {
+  pub name: String,
+  pub processor: String,
+  pub size_vram: Option<u64>,
+  pub size_system: Option<u64>,
+}
+
+#[derive(Serialize)]
+pub struct OllamaRuntimeStatus {
+  pub status: String,
+  pub models: Vec<OllamaRuntimeModel>,
 }
 
 #[derive(Deserialize)]
@@ -242,6 +301,43 @@ fn ollama_timeout() -> Duration {
     .filter(|v| *v > 0)
     .unwrap_or(DEFAULT_OLLAMA_TIMEOUT_SECS);
   Duration::from_secs(seconds)
+}
+
+fn extract_u64(value: &Value, key: &str) -> Option<u64> {
+  value.get(key).and_then(|v| v.as_u64())
+}
+
+fn infer_processor(value: &Value, size_vram: Option<u64>, size_system: Option<u64>) -> String {
+  if let Some(processor) = value.get("processor").and_then(|v| v.as_str()) {
+    return normalize_processor(processor);
+  }
+  let num_gpu = extract_u64(value, "num_gpu").or_else(|| extract_u64(value, "numGpu")).unwrap_or(0);
+  if num_gpu > 0 || size_vram.unwrap_or(0) > 0 {
+    return "GPU".to_string();
+  }
+  if size_system.unwrap_or(0) > 0 {
+    return "CPU".to_string();
+  }
+  "unknown".to_string()
+}
+
+fn normalize_processor(raw: &str) -> String {
+  let lower = raw.trim().to_lowercase();
+  if lower.contains("gpu") {
+    "GPU".to_string()
+  } else if lower.contains("cpu") {
+    "CPU".to_string()
+  } else {
+    raw.trim().to_string()
+  }
+}
+
+fn is_gpu(processor: &str) -> bool {
+  processor.eq_ignore_ascii_case("gpu") || processor.to_lowercase().contains("gpu")
+}
+
+fn is_cpu(processor: &str) -> bool {
+  processor.eq_ignore_ascii_case("cpu") || processor.to_lowercase().contains("cpu")
 }
 
 #[derive(Serialize)]

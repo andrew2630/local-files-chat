@@ -7,7 +7,7 @@ import {
   loadJson,
   modelInstalled,
   splitModelTag,
-} from "./App";
+} from "./App.helpers";
 
 describe("App helpers", () => {
   it("detects embedding models", () => {
@@ -53,6 +53,8 @@ describe("App helpers", () => {
         "Fallback",
       ),
     ).toBe("Hello world");
+    const longText = "a".repeat(80);
+    expect(deriveTitle([{ role: "user", text: longText }], "Fallback")).toBe(longText.slice(0, 48));
     expect(deriveTitle([{ role: "assistant", text: "only bot" }], "Fallback")).toBe("Fallback");
   });
 

@@ -2,8 +2,8 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-4C4C4C)
-![Tauri](https://img.shields.io/badge/Tauri-1.x-24C8DB?logo=tauri&logoColor=white)
-![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)
+![Tauri](https://img.shields.io/badge/Tauri-2.x-24C8DB?logo=tauri&logoColor=white)
+![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)
 ![SQLite](https://img.shields.io/badge/SQLite-sqlite--vec-003B57?logo=sqlite&logoColor=white)
 ![Ollama](https://img.shields.io/badge/Ollama-local-000000)
 
@@ -20,6 +20,9 @@ PL:
 - Lista źródeł (pliki/foldery z podfolderami), statusy indeksu i ręczne odświeżanie per plik.
 - Auto-reindeksowanie po zmianie plików (watcher).
 - Ustawienia zaawansowane: chunk size/overlap, MMR, threshold, OCR.
+- Historia rozmow i zapisywanie sesji lokalnie.
+- Sterowanie Ollama: host, status zdrowia, GPU/CPU, start/stop przy trybie zarzadzanym.
+- Ustawienia aplikacji: jezyk/motyw oraz dostrajanie wyszukiwania i indeksowania.
 
 EN:
 - Offline RAG: local SQLite + sqlite-vec, no paid APIs.
@@ -27,10 +30,13 @@ EN:
 - Sources list (files/folders with subfolders), index status, and manual refresh per file.
 - Auto re-indexing on file changes (watcher).
 - Advanced settings: chunk size/overlap, MMR, threshold, OCR.
+- Chat history with locally saved sessions and derived titles.
+- Ollama controls: host override, health status, GPU/CPU runtime, start/stop when managed.
+- App settings: language/theme plus retrieval and indexing tuning.
 
 ## Tech stack
 
-- Tauri + React
+- Tauri 2 + React 19
 - SQLite + sqlite-vec
 - Ollama (local models)
 - Tesseract OCR
@@ -45,6 +51,7 @@ PL:
   - Fast RAG: `llama3.2:3b`
   - Embeddings: `qwen3-embedding`
 - Pobranie modeli wymaga internetu tylko raz.
+- Mozesz ustawic host Ollama i dodac domyslne zrodla podczas setupu.
 
 EN:
 - The app checks if Ollama is running locally.
@@ -54,10 +61,11 @@ EN:
   - Fast RAG: `llama3.2:3b`
   - Embeddings: `qwen3-embedding`
 - Model downloads require internet only once.
+- You can set a custom Ollama host and add default sources during setup.
 
 ## Requirements
 
-- Ollama installed and running: https://ollama.com
+- Ollama installed and running (or reachable via custom host): https://ollama.com
 - Bundled resources:
   - sqlite-vec extension: `src-tauri/resources/vec0.dll` (Windows) or `src-tauri/resources/libvec0.dylib` (macOS)
   - Tesseract CLI + tessdata: `src-tauri/resources/tesseract/**`
