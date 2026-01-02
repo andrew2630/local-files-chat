@@ -1,4 +1,4 @@
-# Local Files Chat
+﻿# Local Files Chat
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS-4C4C4C)
@@ -105,12 +105,12 @@ gh auth login
 
 Windows (PowerShell):
 ```powershell
-scripts/release.ps1 0.5.0
+scripts/release.ps1 1.0.0
 ```
 
 macOS (bash):
 ```bash
-scripts/release.sh 0.5.0
+scripts/release.sh 1.0.0
 ```
 
 The scripts:

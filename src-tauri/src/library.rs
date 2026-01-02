@@ -24,7 +24,8 @@ use tauri::Manager;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
-use crate::ollama::{ChatMessage, Ollama};
+use crate::ollama::{ChatMessage, Ollama, OllamaHttpError};
+use reqwest::StatusCode;
 
 const DB_NAME: &str = "library.sqlite3";
 
@@ -402,22 +403,69 @@ fn file_fingerprint(p: &Path) -> Result<(String, i64, i64)> {
   Ok((hash, size, mtime))
 }
 
+fn is_chunk_boundary(c: char) -> bool {
+  c.is_whitespace() || matches!(c, '.' | '!' | '?' | ';' | ',' | ':' | ')' | ']' | '}')
+}
+
 fn chunk_text(s: &str, max_chars: usize, overlap: usize) -> Vec<String> {
   let s = s.trim();
-  if s.is_empty() || max_chars == 0 { return vec![]; }
+  if s.is_empty() || max_chars == 0 {
+    return vec![];
+  }
 
-  let mut out = vec![];
-  let mut start = 0usize;
-  let bytes = s.as_bytes();
+  let chars: Vec<char> = s.chars().collect();
+  if chars.is_empty() {
+    return vec![];
+  }
+
+  let max_chars = max_chars.min(chars.len());
   let overlap = overlap.min(max_chars.saturating_sub(1));
 
-  while start < bytes.len() {
-    let end = usize::min(start + max_chars, bytes.len());
-    let chunk = String::from_utf8_lossy(&bytes[start..end]).trim().to_string();
-    if !chunk.is_empty() { out.push(chunk); }
-    if end == bytes.len() { break; }
+  let mut boundaries = Vec::with_capacity(chars.len() + 1);
+  let mut byte_idx = 0usize;
+  boundaries.push(0);
+  for c in &chars {
+    byte_idx += c.len_utf8();
+    boundaries.push(byte_idx);
+  }
+
+  let mut out = Vec::new();
+  let mut start = 0usize;
+  // Prefer boundaries near the end, but fall back to hard cuts to avoid tiny chunks.
+  let min_boundary_len = max_chars.saturating_div(3);
+
+  while start < chars.len() {
+    let mut end = (start + max_chars).min(chars.len());
+
+    let mut boundary_end = None;
+    for idx in (start..end).rev() {
+      if is_chunk_boundary(chars[idx]) {
+        boundary_end = Some(idx + 1);
+        break;
+      }
+    }
+
+    if let Some(boundary) = boundary_end {
+      if boundary > start && (boundary - start) >= min_boundary_len {
+        end = boundary;
+      }
+    }
+
+    if end <= start {
+      break;
+    }
+
+    let chunk = s[boundaries[start]..boundaries[end]].trim().to_string();
+    if !chunk.is_empty() {
+      out.push(chunk);
+    }
+
+    if end == chars.len() {
+      break;
+    }
     start = end.saturating_sub(overlap);
   }
+
   out
 }
 
@@ -660,11 +708,94 @@ fn ollama_embed_batch_size() -> usize {
     .unwrap_or(4)
 }
 
+fn ollama_embed_fallback_chars() -> usize {
+  // OLLAMA_EMBED_FALLBACK_CHARS caps subchunk size when a chunk times out or is too large.
+  std::env::var("OLLAMA_EMBED_FALLBACK_CHARS")
+    .ok()
+    .and_then(|v| v.parse::<usize>().ok())
+    .filter(|v| *v > 0)
+    .unwrap_or(800)
+}
+
+#[derive(Clone, Copy, Debug)]
+enum FallbackStrategy {
+  Average,
+  First,
+}
+
+fn ollama_embed_fallback_strategy() -> FallbackStrategy {
+  // OLLAMA_EMBED_FALLBACK_STRATEGY controls how split embeddings are combined:
+  // - average: combines subchunks (better coverage, slower)
+  // - first: uses the first subchunk only (faster, less coverage)
+  match std::env::var("OLLAMA_EMBED_FALLBACK_STRATEGY").ok().as_deref() {
+    Some(raw) if raw.eq_ignore_ascii_case("first") => FallbackStrategy::First,
+    _ => FallbackStrategy::Average,
+  }
+}
+
 fn is_reqwest_timeout(err: &anyhow::Error) -> bool {
   err
     .downcast_ref::<reqwest::Error>()
     .map(|e| e.is_timeout())
     .unwrap_or(false)
+}
+
+fn is_ollama_input_too_large(err: &anyhow::Error) -> bool {
+  if let Some(http_err) = err.downcast_ref::<OllamaHttpError>() {
+    if http_err.status == StatusCode::PAYLOAD_TOO_LARGE {
+      return true;
+    }
+    if matches!(http_err.status, StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY) {
+      let body = http_err.body.to_lowercase();
+      if body.contains("context")
+        && (body.contains("length") || body.contains("too long") || body.contains("limit"))
+      {
+        return true;
+      }
+      if body.contains("input")
+        && (body.contains("too long") || body.contains("limit") || body.contains("tokens"))
+      {
+        return true;
+      }
+    }
+  }
+
+  let msg = err.to_string().to_lowercase();
+  if msg.contains("context") && (msg.contains("length") || msg.contains("too long") || msg.contains("limit")) {
+    return true;
+  }
+  if msg.contains("input") && (msg.contains("too long") || msg.contains("limit") || msg.contains("tokens")) {
+    return true;
+  }
+  false
+}
+
+fn is_embed_fallback_err(err: &anyhow::Error) -> bool {
+  is_reqwest_timeout(err) || is_ollama_input_too_large(err)
+}
+
+fn average_embeddings(embeds: &[Vec<f32>]) -> Option<Vec<f32>> {
+  if embeds.is_empty() {
+    return None;
+  }
+  let dim = embeds[0].len();
+  if dim == 0 {
+    return None;
+  }
+  let mut out = vec![0.0f32; dim];
+  for emb in embeds {
+    if emb.len() != dim {
+      return None;
+    }
+    for (i, v) in emb.iter().enumerate() {
+      out[i] += *v;
+    }
+  }
+  let denom = embeds.len() as f32;
+  for v in &mut out {
+    *v /= denom;
+  }
+  Some(out)
 }
 
 fn embed_batch_with_retry(ollama: &Ollama, embed_model: &str, batch: &[String]) -> Result<Vec<Vec<f32>>> {
@@ -691,18 +822,92 @@ fn embed_batch_with_retry(ollama: &Ollama, embed_model: &str, batch: &[String]) 
   }
 }
 
-fn embed_with_batches(ollama: &Ollama, embed_model: &str, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+fn embed_chunk_with_fallback(ollama: &Ollama, embed_model: &str, text: &str) -> Result<Option<Vec<f32>>> {
+  match ollama.embed(embed_model, text) {
+    Ok(embeds) => Ok(embeds.into_iter().next()),
+    Err(err) => {
+      if !is_embed_fallback_err(&err) {
+        return Err(err);
+      }
+
+      let fallback_chars = ollama_embed_fallback_chars();
+      let char_len = text.chars().count();
+      if fallback_chars == 0 || char_len <= fallback_chars {
+        eprintln!("embed fallback: chunk failed (len {char_len}), skipping");
+        return Ok(None);
+      }
+
+      let parts = chunk_text(text, fallback_chars, 0);
+      if parts.len() <= 1 {
+        eprintln!("embed fallback: split produced no subchunks, skipping");
+        return Ok(None);
+      }
+
+      let mut embeds = Vec::new();
+      for part in parts {
+        match ollama.embed(embed_model, part) {
+          Ok(mut out) => {
+            if let Some(emb) = out.pop() {
+              embeds.push(emb);
+            }
+          }
+          Err(part_err) => {
+            if is_embed_fallback_err(&part_err) {
+              eprintln!("embed fallback: subchunk failed, skipping");
+              continue;
+            }
+            return Err(part_err);
+          }
+        }
+      }
+
+      if embeds.is_empty() {
+        return Ok(None);
+      }
+
+      // Only combine embeddings after a split fallback; direct embeddings are returned as-is.
+      let combined = match ollama_embed_fallback_strategy() {
+        FallbackStrategy::Average => average_embeddings(&embeds),
+        FallbackStrategy::First => embeds.first().cloned(),
+      };
+      Ok(combined)
+    }
+  }
+}
+
+fn embed_with_batches(ollama: &Ollama, embed_model: &str, texts: &[String]) -> Result<Vec<Option<Vec<f32>>>> {
   if texts.is_empty() {
     return Ok(vec![]);
   }
   let batch_size = ollama_embed_batch_size();
-  let mut out = Vec::with_capacity(texts.len());
+  let mut out: Vec<Option<Vec<f32>>> = Vec::with_capacity(texts.len());
   let mut start = 0;
   while start < texts.len() {
     let end = usize::min(start + batch_size, texts.len());
-    let batch: Vec<String> = texts[start..end].iter().cloned().collect();
-    let mut embeds = embed_batch_with_retry(ollama, embed_model, &batch)?;
-    out.append(&mut embeds);
+    let batch = &texts[start..end];
+    match embed_batch_with_retry(ollama, embed_model, batch) {
+      Ok(embeds) => {
+        if embeds.len() == batch.len() {
+          out.extend(embeds.into_iter().map(Some));
+        } else {
+          eprintln!("embed batch count mismatch, retrying per chunk");
+          for text in batch {
+            let emb = embed_chunk_with_fallback(ollama, embed_model, text)?;
+            out.push(emb);
+          }
+        }
+      }
+      Err(err) => {
+        if is_embed_fallback_err(&err) {
+          for text in batch {
+            let emb = embed_chunk_with_fallback(ollama, embed_model, text)?;
+            out.push(emb);
+          }
+        } else {
+          return Err(err);
+        }
+      }
+    }
     start = end;
   }
   Ok(out)
@@ -820,6 +1025,27 @@ fn ensure_targets_schema(conn: &Connection) -> Result<()> {
   Ok(())
 }
 
+fn matches_target(path: &Path, target: &IndexTarget) -> bool {
+  if target.path.trim().is_empty() {
+    return false;
+  }
+  let target_path = PathBuf::from(&target.path);
+  match target.kind {
+    IndexTargetKind::File => path == target_path,
+    IndexTargetKind::Folder => {
+      if target.include_subfolders {
+        path.starts_with(&target_path)
+      } else {
+        path.parent() == Some(target_path.as_path())
+      }
+    }
+  }
+}
+
+fn matches_any_target(path: &Path, targets: &[IndexTarget]) -> bool {
+  targets.iter().any(|t| matches_target(path, t))
+}
+
 pub fn list_targets(app: &AppHandle) -> Result<Vec<IndexTarget>> {
   let conn = open_db(app)?;
   ensure_targets_schema(&conn)?;
@@ -863,6 +1089,78 @@ pub fn save_targets(app: &AppHandle, targets: Vec<IndexTarget>) -> Result<()> {
 
   tx.commit()?;
   Ok(())
+}
+
+pub fn prune_index(app: &AppHandle, targets: Vec<IndexTarget>) -> Result<usize> {
+  let mut conn = open_db(app)?;
+  if !has_table(&conn, "files")? {
+    return Ok(0);
+  }
+
+  let has_chunks = has_table(&conn, "chunks")?;
+  let has_fts = has_table(&conn, "chunks_fts")?;
+  let has_vec = has_table(&conn, "vec_chunks")?;
+
+  let total_files: i64 = conn.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))?;
+  if total_files == 0 {
+    return Ok(0);
+  }
+
+  if targets.is_empty() {
+    let tx = conn.transaction()?;
+    if has_vec {
+      tx.execute("DELETE FROM vec_chunks", [])?;
+    }
+    if has_fts {
+      tx.execute("DELETE FROM chunks_fts", [])?;
+    }
+    if has_chunks {
+      tx.execute("DELETE FROM chunks", [])?;
+    }
+    tx.execute("DELETE FROM files", [])?;
+    tx.commit()?;
+    return Ok(total_files as usize);
+  }
+
+  let mut paths_to_delete = Vec::new();
+  {
+    let mut stmt = conn.prepare("SELECT path FROM files")?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    for row in rows {
+      let path = row?;
+      let path_buf = PathBuf::from(&path);
+      if !matches_any_target(&path_buf, &targets) {
+        paths_to_delete.push(path);
+      }
+    }
+  }
+
+  if paths_to_delete.is_empty() {
+    return Ok(0);
+  }
+
+  let tx = conn.transaction()?;
+  for path in &paths_to_delete {
+    if has_vec && has_chunks {
+      tx.execute(
+        "DELETE FROM vec_chunks WHERE rowid IN (SELECT id FROM chunks WHERE file_path=?1)",
+        params![path],
+      )?;
+    }
+    if has_fts && has_chunks {
+      tx.execute(
+        "DELETE FROM chunks_fts WHERE rowid IN (SELECT id FROM chunks WHERE file_path=?1)",
+        params![path],
+      )?;
+    }
+    if has_chunks {
+      tx.execute("DELETE FROM chunks WHERE file_path=?1", params![path])?;
+    }
+    tx.execute("DELETE FROM files WHERE path=?1", params![path])?;
+  }
+  tx.commit()?;
+
+  Ok(paths_to_delete.len())
 }
 
 fn index_documents(
@@ -951,12 +1249,27 @@ fn index_documents(
     } else {
       embed_with_batches(&ollama, embed_model, &chunk_texts)?
     };
-    anyhow::ensure!(
-      embeds.len() == chunk_texts.len(),
-      "Embedding count mismatch: expected {}, got {}",
-      chunk_texts.len(),
-      embeds.len()
-    );
+
+    let mut filtered_texts: Vec<String> = Vec::new();
+    let mut filtered_meta: Vec<(i32, i32, Option<String>)> = Vec::new();
+    let mut filtered_embeds: Vec<Vec<f32>> = Vec::new();
+    for (idx, emb) in embeds.into_iter().enumerate() {
+      if let Some(emb) = emb {
+        filtered_texts.push(chunk_texts[idx].clone());
+        filtered_meta.push(chunk_meta[idx].clone());
+        filtered_embeds.push(emb);
+      } else {
+        eprintln!("embed skip: {} (chunk {})", file_str, idx);
+      }
+    }
+
+    if !chunk_texts.is_empty() && filtered_texts.is_empty() {
+      if emit_progress {
+        app.emit("index_progress", IndexProgress { current: i + 1, total, file: file_str.clone(), status: "error".into() })?;
+      }
+      eprintln!("index skip {}: no embeddings produced", file_str);
+      continue;
+    }
 
     let tx = conn.transaction()?;
     tx.execute("DELETE FROM vec_chunks WHERE rowid IN (SELECT id FROM chunks WHERE file_path=?1)", params![file_str])?;
@@ -967,9 +1280,9 @@ fn index_documents(
       params![file_str, doc.kind.as_str(), hash, size, mtime, now_ts()]
     )?;
 
-    for (idx, text) in chunk_texts.iter().enumerate() {
-      let (page, chunk_index, lang) = &chunk_meta[idx];
-      let emb = &embeds[idx];
+    for (idx, text) in filtered_texts.iter().enumerate() {
+      let (page, chunk_index, lang) = &filtered_meta[idx];
+      let emb = &filtered_embeds[idx];
       tx.execute(
         "INSERT INTO chunks(file_path, page, chunk_index, lang, text) VALUES(?1, ?2, ?3, ?4, ?5)",
         params![&file_str, page, chunk_index, lang, text]
@@ -1049,19 +1362,52 @@ pub fn preview_index(app: &AppHandle, targets: Vec<IndexTarget>) -> Result<Vec<I
   Ok(out)
 }
 
-pub fn chat(app: &AppHandle, question: String, llm_model: String, embed_model: String, settings: RetrievalSettings) -> Result<ChatResult> {
-  let ollama = Ollama::new();
-  let conn = open_db(app)?;
+fn build_chat_messages(question: &str, sources: &[Source]) -> Vec<ChatMessage> {
+  let mut context_block = String::new();
+  for (i, s) in sources.iter().enumerate() {
+    let page = s.page + 1;
+    context_block.push_str(&format!(
+      "\n[{}] {} (page {})\n{}\n",
+      i + 1,
+      s.file_path,
+      page,
+      s.snippet
+    ));
+  }
 
-  let q = ollama.embed(&embed_model, question.as_str())?;
+  let system = "You are a RAG assistant. Answer only using the provided sources. If the sources do not contain the answer, say you don't know. Cite sources in brackets [1], [2], etc. Respond in the same language as the user's question.";
+
+  let user = format!(
+    "Question:\n{}\n\nSources:\n{}\n\nAnswer with citations [1], [2]:",
+    question, context_block
+  );
+
+  vec![
+    ChatMessage { role: "system".into(), content: system.into() },
+    ChatMessage { role: "user".into(), content: user },
+  ]
+}
+
+fn retrieve_sources(
+  conn: &Connection,
+  ollama: &Ollama,
+  question: &str,
+  embed_model: &str,
+  settings: &RetrievalSettings,
+) -> Result<Vec<Source>> {
+  let q = ollama.embed(embed_model, question)?;
   let q0 = q.get(0).context("No embedding returned")?;
   let q_json = serde_json::to_string(q0)?;
 
-  let q_lang = detect_lang_code(&question);
+  let q_lang = detect_lang_code(question);
 
-  let mut candidate_k = settings.top_k.max(1);
+  let top_k = settings.top_k.max(1);
+  let mut candidate_k = top_k;
   if settings.use_mmr {
-    candidate_k = candidate_k.max(settings.mmr_candidates.max(1));
+    // Cap candidate set size to keep MMR latency bounded.
+    let max_mmr = top_k.saturating_mul(4).min(64);
+    let mmr_candidates = settings.mmr_candidates.max(1).min(max_mmr);
+    candidate_k = candidate_k.max(mmr_candidates);
   }
 
   let mut stmt = conn.prepare(
@@ -1118,9 +1464,9 @@ pub fn chat(app: &AppHandle, question: String, llm_model: String, embed_model: S
     candidates
   };
 
-  if let Some(fts_query) = build_fts_query(&question) {
-    if has_table(&conn, "chunks_fts")? {
-      let fts_ranks = fetch_fts_ranks(&conn, &fts_query, candidate_k as usize);
+  if let Some(fts_query) = build_fts_query(question) {
+    if has_table(conn, "chunks_fts")? {
+      let fts_ranks = fetch_fts_ranks(conn, &fts_query, candidate_k as usize);
       if !fts_ranks.is_empty() {
         let rrf_k = 60.0f64;
         let mut scored: Vec<(Candidate, f64)> = filtered
@@ -1142,10 +1488,10 @@ pub fn chat(app: &AppHandle, question: String, llm_model: String, embed_model: S
     }
   }
 
-  let top_k = settings.top_k.max(1) as usize;
+  let top_k = top_k as usize;
   if filtered.len() > top_k && settings.use_mmr {
     let texts: Vec<String> = filtered.iter().map(|c| c.text.clone()).collect();
-    let mut embeds = ollama.embed(&embed_model, texts)?;
+    let mut embeds = ollama.embed(embed_model, texts)?;
     let lambda = settings.mmr_lambda.clamp(0.0, 1.0);
 
     if embeds.len() < filtered.len() {
@@ -1203,30 +1549,55 @@ pub fn chat(app: &AppHandle, question: String, llm_model: String, embed_model: S
     let snippet = c.text.chars().take(600).collect::<String>();
     sources.push(Source { file_path: c.file_path, page: c.page, snippet, distance: c.distance });
   }
+  Ok(sources)
+}
 
-  let mut context_block = String::new();
-  for (i, s) in sources.iter().enumerate() {
-    let page = s.page + 1;
-    context_block.push_str(&format!(
-      "\n[{}] {} (page {})\n{}\n",
-      i + 1,
-      s.file_path,
-      page,
-      s.snippet
-    ));
+pub fn chat(app: &AppHandle, question: String, llm_model: String, embed_model: String, settings: RetrievalSettings) -> Result<ChatResult> {
+  let ollama = Ollama::new();
+  let conn = open_db(app)?;
+
+  let sources = retrieve_sources(&conn, &ollama, &question, &embed_model, &settings)?;
+  let messages = build_chat_messages(&question, &sources);
+  let answer = ollama.chat(&llm_model, messages)?;
+
+  Ok(ChatResult { answer, sources })
+}
+
+pub fn chat_stream(
+  app: &AppHandle,
+  question: String,
+  llm_model: String,
+  embed_model: String,
+  settings: RetrievalSettings,
+) -> Result<ChatResult> {
+  let ollama = Ollama::new();
+  let conn = open_db(app)?;
+
+  let sources = retrieve_sources(&conn, &ollama, &question, &embed_model, &settings)?;
+  let messages = build_chat_messages(&question, &sources);
+
+  let mut answer = String::new();
+  let mut saw_delta = false;
+  let stream_res = ollama.chat_stream(&llm_model, messages, |delta| {
+    saw_delta = true;
+    answer.push_str(delta);
+    let _ = app.emit("chat_delta", delta);
+  });
+
+  match stream_res {
+    Ok(full) => {
+      if !full.is_empty() {
+        answer = full;
+      }
+    }
+    Err(err) => {
+      if !saw_delta {
+        let fallback = ollama.chat(&llm_model, build_chat_messages(&question, &sources))?;
+        return Ok(ChatResult { answer: fallback, sources });
+      }
+      eprintln!("chat stream error: {}", err);
+    }
   }
-
-  let system = "You are a RAG assistant. Answer only using the provided sources. If the sources do not contain the answer, say you don't know. Cite sources in brackets [1], [2], etc. Respond in the same language as the user's question.";
-
-  let user = format!(
-    "Question:\n{}\n\nSources:\n{}\n\nAnswer with citations [1], [2]:",
-    question, context_block
-  );
-
-  let answer = ollama.chat(&llm_model, vec![
-    ChatMessage { role: "system".into(), content: system.into() },
-    ChatMessage { role: "user".into(), content: user },
-  ])?;
 
   Ok(ChatResult { answer, sources })
 }
@@ -1256,6 +1627,18 @@ mod tests {
   fn chunk_text_splits_with_overlap() {
     let chunks = chunk_text("abcdefgh", 3, 1);
     assert_eq!(chunks, vec!["abc", "cde", "efg", "gh"]);
+  }
+
+  #[test]
+  fn chunk_text_prefers_boundaries() {
+    let chunks = chunk_text("alpha beta gamma", 10, 0);
+    assert_eq!(chunks, vec!["alpha", "beta", "gamma"]);
+  }
+
+  #[test]
+  fn chunk_text_handles_utf8_without_replacement() {
+    let chunks = chunk_text("zażółć gęślą jaźń", 6, 0);
+    assert!(chunks.iter().all(|c| !c.contains('\u{FFFD}')));
   }
 
   #[test]

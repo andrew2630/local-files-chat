@@ -67,7 +67,7 @@ const DEFAULT_INDEX_SETTINGS: IndexSettings = {
 const DEFAULT_RETRIEVAL_SETTINGS: RetrievalSettings = {
   topK: 8,
   maxDistance: null,
-  useMmr: true,
+  useMmr: false,
   mmrLambda: 0.7,
   mmrCandidates: 24,
 };
@@ -147,6 +147,9 @@ const copy = {
     modelsEmpty: "Nie znaleziono modeli w Ollama.",
     modelsError: "Nie można pobrać modeli z Ollama.",
     modelsUnavailable: "Nie można połączyć się z Ollama. Uruchom usługę i spróbuj ponownie.",
+    ollamaHealth: "Status Ollama",
+    ollamaHealthOk: "Połączenie OK",
+    ollamaHealthError: "Błąd Ollama",
     retrievalTitle: "Ustawienia wyszukiwania",
     topK: "Top K",
     filesTitle: "Pliki do indeksu",
@@ -171,6 +174,8 @@ const copy = {
     status: "Status",
     progress: "Postęp",
     chatThinking: "Myśli...",
+    chatStreaming: "Strumień",
+    chatFinalized: "Finalna",
     chatReady: "Gotowy",
     chatError: "Błąd",
     modelHint: "Modele są pobierane z lokalnej instancji Ollama.",
@@ -291,6 +296,9 @@ const copy = {
     modelsEmpty: "No models found in Ollama.",
     modelsError: "Cannot load models from Ollama.",
     modelsUnavailable: "Cannot reach Ollama. Start it and try again.",
+    ollamaHealth: "Ollama health",
+    ollamaHealthOk: "Connection OK",
+    ollamaHealthError: "Ollama error",
     retrievalTitle: "Search settings",
     topK: "Top K",
     filesTitle: "Files to index",
@@ -315,6 +323,8 @@ const copy = {
     status: "Status",
     progress: "Progress",
     chatThinking: "Thinking...",
+    chatStreaming: "Streaming",
+    chatFinalized: "Finalized",
     chatReady: "Ready",
     chatError: "Error",
     modelHint: "Models are fetched from your local Ollama instance.",
@@ -443,6 +453,13 @@ export function getMissingModels(models: string[], defaults: { chat: string; fas
   const required = [defaults.chat, defaults.fast, defaults.embed];
   const missing = required.filter((model) => !modelInstalled(models, model));
   return Array.from(new Set(missing));
+}
+
+function extractOllamaError(err: unknown) {
+  const raw = String(err ?? "");
+  const idx = raw.indexOf("Ollama error ");
+  if (idx === -1) return null;
+  return raw.slice(idx);
 }
 
 type IconProps = {
@@ -684,7 +701,13 @@ export default function App() {
   const [q, setQ] = useState("");
   const [chatBusy, setChatBusy] = useState(false);
   const [chatError, setChatError] = useState<string | null>(null);
+  const [chatStreaming, setChatStreaming] = useState(false);
+  const [chatFinalized, setChatFinalized] = useState(false);
+  const [ollamaHealth, setOllamaHealth] = useState<{ status: "ok" | "error"; message?: string }>(() => ({
+    status: "ok",
+  }));
   const chatLogRef = useRef<HTMLDivElement | null>(null);
+  const streamSessionRef = useRef<string | null>(null);
 
   const [sessions, setSessions] = useState<ChatSession[]>(() =>
     loadJson(STORAGE_KEYS.sessions, [] as ChatSession[]),
@@ -702,6 +725,17 @@ export default function App() {
   );
   const log = activeSession?.messages ?? [];
 
+  function markOllamaOk() {
+    setOllamaHealth({ status: "ok" });
+  }
+
+  function markOllamaError(err: unknown) {
+    const msg = extractOllamaError(err);
+    if (msg) {
+      setOllamaHealth({ status: "error", message: msg });
+    }
+  }
+
   async function startSetup() {
     setSetupState("running");
     setSetupMessage(t.setupRunning);
@@ -710,8 +744,10 @@ export default function App() {
     try {
       await syncOllamaHost();
       await invoke("run_setup");
+      markOllamaOk();
     } catch (err) {
       setSetupError(String(err));
+      markOllamaError(err);
       setSetupState("needs");
     }
   }
@@ -733,6 +769,9 @@ export default function App() {
     try {
       await syncOllamaHost();
       const status = (await invoke("setup_status")) as SetupStatus;
+      if (status.running) {
+        markOllamaOk();
+      }
       setOllamaRunning(status.running);
       const defaults = { chat: status.defaultChat, fast: status.defaultFast, embed: status.defaultEmbed };
       setSetupDefaults(defaults);
@@ -758,6 +797,7 @@ export default function App() {
       setSetupState("ready");
     } catch (err) {
       setSetupError(String(err));
+      markOllamaError(err);
       setSetupState("needs");
     }
   }
@@ -877,6 +917,7 @@ export default function App() {
       await syncOllamaHost();
       const res = (await invoke("list_models")) as string[];
       setModels(res);
+      markOllamaOk();
 
       const embedCandidates = res.filter(isEmbeddingModel);
       const chatCandidates = res.filter((m) => !isEmbeddingModel(m));
@@ -895,6 +936,7 @@ export default function App() {
       }
     } catch (err) {
       setModelError(String(err));
+      markOllamaError(err);
     } finally {
       setModelsBusy(false);
     }
@@ -967,6 +1009,22 @@ export default function App() {
       unlistenProgress?.();
       unlistenDone?.();
       unlistenError?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    let unlistenDelta: (() => void) | null = null;
+    listen<string>("chat_delta", (event) => {
+      const sessionId = streamSessionRef.current;
+      if (!sessionId) return;
+      setChatStreaming(true);
+      setChatFinalized(false);
+      updateLastAssistant(sessionId, (m) => ({ ...m, text: m.text + event.payload }));
+    }).then((unlisten) => {
+      unlistenDelta = unlisten;
+    });
+    return () => {
+      unlistenDelta?.();
     };
   }, []);
 
@@ -1196,7 +1254,18 @@ export default function App() {
   }
 
   function removeTarget(id: string) {
-    setTargets((prev) => prev.filter((t) => t.id !== id));
+    setTargets((prev) => {
+      const next = prev.filter((t) => t.id !== id);
+      if (targetsLoaded) {
+        const payload = next.map(({ path, kind, includeSubfolders }) => ({
+          path,
+          kind,
+          includeSubfolders,
+        }));
+        invoke("prune_index", { targets: payload }).catch(() => {});
+      }
+      return next;
+    });
   }
 
   function toggleSubfolders(id: string, value: boolean) {
@@ -1223,6 +1292,23 @@ export default function App() {
       const title = deriveTitle(messages, session.title || t.newChat);
       const next = [...prev];
       next[idx] = { ...session, messages, title };
+      return next;
+    });
+  }
+
+  function updateLastAssistant(sessionId: string, updater: (message: ChatMessage) => ChatMessage) {
+    setSessions((prev) => {
+      const idx = prev.findIndex((session) => session.id === sessionId);
+      if (idx === -1) return prev;
+      const session = prev[idx];
+      if (session.messages.length === 0) return prev;
+      const lastIdx = session.messages.length - 1;
+      const last = session.messages[lastIdx];
+      if (last.role !== "assistant") return prev;
+      const messages = [...session.messages];
+      messages[lastIdx] = updater(last);
+      const next = [...prev];
+      next[idx] = { ...session, messages };
       return next;
     });
   }
@@ -1277,20 +1363,44 @@ export default function App() {
     }
     setQ("");
     setChatError(null);
+    setChatStreaming(false);
+    setChatFinalized(false);
     appendMessage(sessionId, { role: "user", text: query });
+    appendMessage(sessionId, { role: "assistant", text: "" });
+    streamSessionRef.current = sessionId;
     setChatBusy(true);
     try {
       await syncOllamaHost();
-      const resp = (await invoke("chat", {
+      const resp = (await invoke("chat_stream", {
         question: query,
         llmModel: chatModel,
         embedModel,
         settings: retrievalSettings,
       })) as ChatResponse;
-      appendMessage(sessionId, { role: "assistant", text: resp.answer, sources: resp.sources });
+      updateLastAssistant(sessionId, (m) => ({ ...m, text: resp.answer, sources: resp.sources }));
+      setChatFinalized(true);
+      markOllamaOk();
     } catch (err) {
       setChatError(String(err));
+      setChatStreaming(false);
+      setChatFinalized(false);
+      markOllamaError(err);
+      setSessions((prev) => {
+        const idx = prev.findIndex((session) => session.id === sessionId);
+        if (idx === -1) return prev;
+        const session = prev[idx];
+        if (session.messages.length === 0) return prev;
+        const lastIdx = session.messages.length - 1;
+        const last = session.messages[lastIdx];
+        if (last.role !== "assistant" || last.text.trim() !== "") return prev;
+        const messages = session.messages.slice(0, -1);
+        const next = [...prev];
+        next[idx] = { ...session, messages };
+        return next;
+      });
     } finally {
+      streamSessionRef.current = null;
+      setChatStreaming(false);
       setChatBusy(false);
     }
   }
@@ -1299,6 +1409,8 @@ export default function App() {
     setActiveSessionId("");
     setQ("");
     setChatError(null);
+    setChatStreaming(false);
+    setChatFinalized(false);
     setView("chat");
   }
 
@@ -1375,6 +1487,15 @@ export default function App() {
       ? { key: "error", label: t.chatError, icon: Icons.alert }
       : { key: "ready", label: t.chatReady, icon: Icons.check };
   const chatStatusTitle = chatError ? `${t.chatError}: ${chatError}` : chatStatus.label;
+  const streamStatus = chatStreaming
+    ? { key: "streaming", label: t.chatStreaming }
+    : chatFinalized
+      ? { key: "finalized", label: t.chatFinalized }
+      : null;
+  const healthTitle =
+    ollamaHealth.status === "error"
+      ? ollamaHealth.message || t.ollamaHealthError
+      : t.ollamaHealthOk;
   const showSetupDownload = setupState === "running";
   const setupDownloadLabel = setupMessage || t.setupRunning;
   const deleteSession = deleteDialog.sessionId
@@ -1394,6 +1515,16 @@ export default function App() {
           </div>
         </div>
         <div className="topbar-actions">
+          {(ollamaRunning || ollamaHealth.status === "error") && (
+            <div className="health-row health-compact" title={healthTitle}>
+              <span className="health-label">{t.ollamaHealth}</span>
+              <span className={`status-pill ${ollamaHealth.status === "ok" ? "ready" : "error"}`}>
+                <span className="status-text">
+                  {ollamaHealth.status === "ok" ? t.ollamaHealthOk : t.ollamaHealthError}
+                </span>
+              </span>
+            </div>
+          )}
           {showSetupDownload && (
             <div className="download-status">
               <div className="status-pill busy" title={setupDownloadLabel}>
@@ -1473,6 +1604,11 @@ export default function App() {
                 {chatStatus.icon}
                 <span className="status-text">{chatStatus.label}</span>
               </div>
+              {streamStatus && (
+                <div className={`status-pill ${streamStatus.key}`} title={streamStatus.label}>
+                  <span className="status-text">{streamStatus.label}</span>
+                </div>
+              )}
               <button
                 className="icon-button ghost icon-only"
                 onClick={createNewChat}
@@ -1957,6 +2093,19 @@ export default function App() {
               </div>
               <div className="hint">{t.modelHint}</div>
               {!ollamaRunning && <div className="warning">{t.modelsUnavailable}</div>}
+              {ollamaRunning && (
+                <div className="health-row">
+                  <span className="health-label">{t.ollamaHealth}</span>
+                  <span className={`status-pill ${ollamaHealth.status === "ok" ? "ready" : "error"}`}>
+                    <span className="status-text">
+                      {ollamaHealth.status === "ok" ? t.ollamaHealthOk : t.ollamaHealthError}
+                    </span>
+                  </span>
+                  {ollamaHealth.status === "error" && ollamaHealth.message && (
+                    <span className="health-detail">{ollamaHealth.message}</span>
+                  )}
+                </div>
+              )}
               <div className="field">
                 <div className="label-with-help">
                   <label htmlFor="settings-chat-model">{t.chatModel}</label>

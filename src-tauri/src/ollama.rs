@@ -1,11 +1,43 @@
 use anyhow::{anyhow, Result};
 use reqwest::blocking::Client;
-use reqwest::Client as AsyncClient;
+use reqwest::{Client as AsyncClient, StatusCode};
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::io::BufRead;
 use std::time::Duration;
 
 const DEFAULT_OLLAMA_BASE: &str = "http://127.0.0.1:11434/api";
 const DEFAULT_OLLAMA_TIMEOUT_SECS: u64 = 300;
+const MAX_ERROR_BODY_BYTES: usize = 4096;
+
+#[derive(Debug)]
+pub struct OllamaHttpError {
+  pub status: StatusCode,
+  pub body: String,
+}
+
+impl fmt::Display for OllamaHttpError {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(f, "Ollama error {}: {}", self.status, self.body)
+  }
+}
+
+impl std::error::Error for OllamaHttpError {}
+
+fn truncate_body(body: &str) -> String {
+  if body.len() <= MAX_ERROR_BODY_BYTES {
+    return body.to_string();
+  }
+  let mut end = 0usize;
+  for (idx, ch) in body.char_indices() {
+    let next = idx + ch.len_utf8();
+    if next > MAX_ERROR_BODY_BYTES {
+      break;
+    }
+    end = next;
+  }
+  format!("{}...[truncated]", &body[..end])
+}
 
 #[derive(Clone)]
 pub struct Ollama {
@@ -34,13 +66,17 @@ impl Ollama {
     };
 
     // /api/embed: input może być string albo array stringów 
-    let resp: EmbedResponse = self
+    let resp = self
       .http
       .post(format!("{}/embed", self.base))
       .json(&req)
-      .send()?
-      .error_for_status()?
-      .json()?;
+      .send()?;
+    let status = resp.status();
+    if !status.is_success() {
+      let body = truncate_body(&resp.text().unwrap_or_default());
+      return Err(anyhow!(OllamaHttpError { status, body }));
+    }
+    let resp: EmbedResponse = resp.json()?;
 
     Ok(resp.embeddings)
   }
@@ -53,13 +89,17 @@ impl Ollama {
     };
 
     // /api/chat 
-    let resp: ChatResponse = self
+    let resp = self
       .http
       .post(format!("{}/chat", self.base))
       .json(&req)
-      .send()?
-      .error_for_status()?
-      .json()?;
+      .send()?;
+    let status = resp.status();
+    if !status.is_success() {
+      let body = truncate_body(&resp.text().unwrap_or_default());
+      return Err(anyhow!(OllamaHttpError { status, body }));
+    }
+    let resp: ChatResponse = resp.json()?;
 
     resp
       .message
@@ -67,13 +107,75 @@ impl Ollama {
       .ok_or_else(|| anyhow!("No message content in Ollama response"))
   }
 
+  pub fn chat_stream<F>(&self, model: &str, messages: Vec<ChatMessage>, mut on_delta: F) -> Result<String>
+  where
+    F: FnMut(&str),
+  {
+    let req = ChatRequest {
+      model: model.to_string(),
+      messages,
+      stream: Some(true),
+    };
+
+    let resp = self
+      .http
+      .post(format!("{}/chat", self.base))
+      .json(&req)
+      .send()?;
+    let status = resp.status();
+    if !status.is_success() {
+      let body = truncate_body(&resp.text().unwrap_or_default());
+      return Err(anyhow!(OllamaHttpError { status, body }));
+    }
+
+    let mut reader = std::io::BufReader::new(resp);
+    let mut line = String::new();
+    let mut answer = String::new();
+
+    loop {
+      line.clear();
+      let read = reader.read_line(&mut line)?;
+      if read == 0 {
+        break;
+      }
+      let trimmed = line.trim();
+      if trimmed.is_empty() {
+        continue;
+      }
+      let payload = trimmed.strip_prefix("data: ").unwrap_or(trimmed);
+      if payload == "[DONE]" {
+        break;
+      }
+
+      let chunk: ChatStreamResponse = serde_json::from_str(payload)?;
+      if let Some(err) = chunk.error {
+        return Err(anyhow!("Ollama stream error: {err}"));
+      }
+      if let Some(msg) = chunk.message {
+        if !msg.content.is_empty() {
+          on_delta(&msg.content);
+          answer.push_str(&msg.content);
+        }
+      }
+      if chunk.done.unwrap_or(false) {
+        break;
+      }
+    }
+
+    Ok(answer)
+  }
+
   pub fn list_models(&self) -> Result<Vec<String>> {
-    let resp: TagsResponse = self
+    let resp = self
       .http
       .get(format!("{}/tags", self.base))
-      .send()?
-      .error_for_status()?
-      .json()?;
+      .send()?;
+    let status = resp.status();
+    if !status.is_success() {
+      let body = truncate_body(&resp.text().unwrap_or_default());
+      return Err(anyhow!(OllamaHttpError { status, body }));
+    }
+    let resp: TagsResponse = resp.json()?;
 
     Ok(resp.models.into_iter().map(|m| m.name).collect())
   }
@@ -95,8 +197,12 @@ pub async fn list_models_with_timeout(timeout: Duration) -> Result<Vec<String>> 
   let resp = client
     .get(format!("{base}/tags"))
     .send()
-    .await?
-    .error_for_status()?;
+    .await?;
+  let status = resp.status();
+  if !status.is_success() {
+    let body = truncate_body(&resp.text().await.unwrap_or_default());
+    return Err(anyhow!(OllamaHttpError { status, body }));
+  }
   let data: TagsResponse = resp.json().await?;
   Ok(data.models.into_iter().map(|m| m.name).collect())
 }
@@ -184,6 +290,13 @@ struct ChatRequest {
 #[derive(Deserialize)]
 struct ChatResponse {
   message: Option<ChatMessage>,
+}
+
+#[derive(Deserialize)]
+struct ChatStreamResponse {
+  message: Option<ChatMessage>,
+  done: Option<bool>,
+  error: Option<String>,
 }
 
 #[cfg(test)]

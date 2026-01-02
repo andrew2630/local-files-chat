@@ -504,6 +504,23 @@ async fn chat(
 }
 
 #[tauri::command]
+async fn chat_stream(
+  app: AppHandle,
+  question: String,
+  llm_model: String,
+  embed_model: String,
+  settings: library::RetrievalSettings,
+) -> Result<library::ChatResult, String> {
+  let app = app.clone();
+  tauri::async_runtime::spawn_blocking(move || {
+    library::chat_stream(&app, question, llm_model, embed_model, settings)
+      .map_err(|e| format!("{:#}", e))
+  })
+  .await
+  .map_err(|e| format!("chat task join error: {e}"))?
+}
+
+#[tauri::command]
 fn reindex_files(
   app: AppHandle,
   state: State<AppState>,
@@ -556,6 +573,11 @@ fn save_targets(app: AppHandle, state: State<AppState>, targets: Vec<library::In
   Ok(())
 }
 
+#[tauri::command]
+fn prune_index(app: AppHandle, targets: Vec<library::IndexTarget>) -> Result<usize, String> {
+  library::prune_index(&app, targets).map_err(|e| format!("{:#}", e))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   tauri::Builder::default()
@@ -575,11 +597,13 @@ pub fn run() {
       run_setup,
       start_index,
       chat,
+      chat_stream,
       reindex_files,
       preview_index,
       list_models,
       list_targets,
-      save_targets
+      save_targets,
+      prune_index
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");

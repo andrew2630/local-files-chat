@@ -423,8 +423,54 @@ body {
   color: var(--badge-good-ink);
 }
 
+.status-pill.streaming {
+  border-color: var(--badge-info-border);
+  background: var(--badge-info-bg);
+  color: var(--badge-info-ink);
+}
+
+.status-pill.finalized {
+  border-color: var(--badge-good-border);
+  background: var(--badge-good-bg);
+  color: var(--badge-good-ink);
+}
+
 .status-text {
   white-space: nowrap;
+}
+
+.health-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.health-compact {
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  box-shadow: var(--shadow-soft);
+}
+
+.health-compact .status-pill {
+  padding: 4px 8px;
+}
+
+.health-label {
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.health-detail {
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
 }
 
 .card-actions {
