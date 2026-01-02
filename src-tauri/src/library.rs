@@ -1680,9 +1680,18 @@ mod tests {
 
   #[test]
   fn tesseract_base_dir_detects_parent() {
-    let bin = PathBuf::from("C:\\tesseract\\bin\\tesseract.exe");
+    let bin = if cfg!(windows) {
+      PathBuf::from(r"C:\tesseract\bin\tesseract.exe")
+    } else {
+      PathBuf::from("/usr/local/bin/tesseract")
+    };
+    let expected = if cfg!(windows) {
+      PathBuf::from(r"C:\tesseract")
+    } else {
+      PathBuf::from("/usr/local")
+    };
     let base = tesseract_base_dir(&bin).unwrap();
-    assert!(base.ends_with("C:\\tesseract"));
+    assert!(base.ends_with(&expected));
   }
 
   #[test]

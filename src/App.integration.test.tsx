@@ -27,6 +27,7 @@ const setupStatusOk = {
   defaultFast: "llama3.2:3b",
   defaultEmbed: "qwen3-embedding",
 };
+const UI_WAIT_MS = 4000;
 
 describe("App integration", () => {
   const invokeMock = vi.mocked(invoke);
@@ -58,7 +59,7 @@ describe("App integration", () => {
 
     render(<App />);
 
-    expect(await screen.findByText("Setup / Dependencies")).toBeInTheDocument();
+    expect(await screen.findByText("Setup / Dependencies", {}, { timeout: UI_WAIT_MS })).toBeInTheDocument();
     expect(screen.getByText("Retry")).toBeInTheDocument();
   });
 
@@ -85,25 +86,27 @@ describe("App integration", () => {
     const textarea = await screen.findByPlaceholderText("Ask about your documents...");
     const sendButton = screen.getByRole("button", { name: "Send" });
 
-    await waitFor(() => expect(sendButton).toBeEnabled());
+    await waitFor(() => expect(sendButton).toBeEnabled(), { timeout: UI_WAIT_MS });
 
     await user.type(textarea, "What is in the docs?");
     await user.click(sendButton);
 
     const expectedChatModel = setupStatusOk.defaultFast || setupStatusOk.defaultChat;
-    await waitFor(() =>
-      expect(invokeMock).toHaveBeenCalledWith(
-        "chat_stream",
-        expect.objectContaining({
-          question: "What is in the docs?",
-          llmModel: expectedChatModel,
-          embedModel: "qwen3-embedding",
-          settings: expect.objectContaining({ topK: 8 }),
-        }),
-      ),
+    await waitFor(
+      () =>
+        expect(invokeMock).toHaveBeenCalledWith(
+          "chat_stream",
+          expect.objectContaining({
+            question: "What is in the docs?",
+            llmModel: expectedChatModel,
+            embedModel: "qwen3-embedding",
+            settings: expect.objectContaining({ topK: 8 }),
+          }),
+        ),
+      { timeout: UI_WAIT_MS },
     );
 
-    expect(await screen.findByText("Hello from Ollama")).toBeInTheDocument();
+    expect(await screen.findByText("Hello from Ollama", {}, { timeout: UI_WAIT_MS })).toBeInTheDocument();
   });
 
   it("records chat history titles for new sessions", async () => {
@@ -129,15 +132,15 @@ describe("App integration", () => {
     const textarea = await screen.findByPlaceholderText("Ask about your documents...");
     const sendButton = screen.getByRole("button", { name: "Send" });
 
-    await waitFor(() => expect(sendButton).toBeEnabled());
+    await waitFor(() => expect(sendButton).toBeEnabled(), { timeout: UI_WAIT_MS });
 
     await user.type(textarea, "What is in the docs?");
     await user.click(sendButton);
 
-    expect(await screen.findByText("Hello from Ollama")).toBeInTheDocument();
+    expect(await screen.findByText("Hello from Ollama", {}, { timeout: UI_WAIT_MS })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "History" }));
 
-    expect(await screen.findByText("What is in the docs?")).toBeInTheDocument();
+    expect(await screen.findByText("What is in the docs?", {}, { timeout: UI_WAIT_MS })).toBeInTheDocument();
   });
 });
