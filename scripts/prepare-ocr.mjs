@@ -29,13 +29,18 @@ if (!existingBin) {
   const providedDir = process.env.TESSERACT_DIR;
   if (providedDir) {
     copyDirectory(providedDir, RESOURCES_DIR);
-  } else if (process.platform === "win32") {
-    await installWindowsTesseract(RESOURCES_DIR);
-  } else if (process.platform === "darwin") {
-    await installDarwinTesseract(RESOURCES_DIR);
   } else {
-    console.error("Tesseract not found. Set TESSERACT_DIR to continue.");
-    process.exit(1);
+    const pathBin = findTesseractOnPath();
+    if (pathBin) {
+      copyFromPathTesseract(pathBin, RESOURCES_DIR);
+    } else if (process.platform === "win32") {
+      await installWindowsTesseract(RESOURCES_DIR);
+    } else if (process.platform === "darwin") {
+      await installDarwinTesseract(RESOURCES_DIR);
+    } else {
+      console.error("Tesseract not found. Set TESSERACT_DIR to continue.");
+      process.exit(1);
+    }
   }
 }
 
@@ -58,6 +63,42 @@ function findTesseractBin(baseDir) {
     path.join(baseDir, "tesseract"),
   ];
   return candidates.find(fileExists) ?? null;
+}
+
+function findTesseractOnPath() {
+  const pathValue = process.env.PATH ?? "";
+  const entries = pathValue.split(path.delimiter).filter(Boolean);
+  const names = process.platform === "win32" ? ["tesseract.exe", "tesseract"] : ["tesseract"];
+  for (const entry of entries) {
+    for (const name of names) {
+      const candidate = path.join(entry, name);
+      if (fileExists(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+
+function copyFromPathTesseract(binPath, targetDir) {
+  const binDir = path.dirname(binPath);
+  const isBinDir = path.basename(binDir).toLowerCase() === "bin";
+  const root = isBinDir ? path.dirname(binDir) : binDir;
+
+  if (process.platform === "win32") {
+    copyDirectory(root, targetDir);
+    return;
+  }
+
+  if (process.platform === "darwin") {
+    const binSrc = path.join(root, "bin");
+    const libSrc = path.join(root, "lib");
+    const shareSrc = path.join(root, "share", "tessdata");
+
+    if (fs.existsSync(binSrc)) copyDirectory(binSrc, path.join(targetDir, "bin"));
+    if (fs.existsSync(libSrc)) copyDirectory(libSrc, path.join(targetDir, "lib"));
+    if (fs.existsSync(shareSrc)) copyDirectory(shareSrc, path.join(targetDir, "share", "tessdata"));
+    if (!fs.existsSync(binSrc)) copyDirectory(binDir, targetDir);
+    return;
+  }
 }
 
 function copyDirectory(src, dest) {
