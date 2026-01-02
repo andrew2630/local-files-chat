@@ -792,12 +792,11 @@ textarea:disabled {
   transform: none;
 }
 
-.help-icon::after {
-  content: attr(data-tooltip);
+.help-tooltip {
   position: absolute;
-  left: 0;
+  left: 50%;
   top: calc(100% + 6px);
-  transform: translate(0, -4px);
+  transform: translate(calc(-50% + var(--tooltip-shift, 0px)), -4px);
   background: var(--ink);
   color: var(--bg-elev);
   font-size: 11px;
@@ -814,10 +813,10 @@ textarea:disabled {
   box-shadow: var(--shadow-soft);
 }
 
-.help-icon:hover::after,
-.help-icon:focus-visible::after {
+.help-icon:hover .help-tooltip,
+.help-icon:focus-visible .help-tooltip {
   opacity: 1;
-  transform: translate(0, 0);
+  transform: translate(calc(-50% + var(--tooltip-shift, 0px)), 0);
 }
 
 .field input,

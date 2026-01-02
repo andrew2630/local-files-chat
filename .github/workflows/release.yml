@@ -59,6 +59,20 @@ jobs:
         run: npx tauri build --ci
         env:
           SKIP_OCR_SETUP: "1"
+      - name: Ad-hoc sign macOS app
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          APP_PATH="$(find src-tauri/target/release/bundle -maxdepth 3 -name "*.app" -print0 | xargs -0 ls -td 2>/dev/null | head -n 1)"
+          if [[ -z "$APP_PATH" ]]; then
+            echo "No .app bundle found to sign."
+            exit 1
+          fi
+          bash scripts/macos/adhoc-sign.sh "$APP_PATH"
+      - name: Create macOS portable zip
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: SKIP_ADHOC_SIGN=1 bash scripts/macos/make-portable-zip.sh
       - name: Upload Windows bundle
         if: matrix.os == 'windows-latest'
         uses: actions/upload-artifact@v4
@@ -71,7 +85,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: bundle-macos
-          path: src-tauri/target/release/bundle/dmg/*.dmg
+          path: |
+            src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/portable/*.zip
           if-no-files-found: error
 
   release:
@@ -86,4 +102,5 @@ jobs:
           files: |
             artifacts/**/*.exe
             artifacts/**/*.dmg
+            artifacts/**/*.zip
           fail_on_unmatched_files: true

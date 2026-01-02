@@ -93,8 +93,15 @@ npx tauri build
 Installers are created here:
 - Windows (NSIS): `src-tauri/target/release/bundle/nsis/*.exe`
 - macOS (DMG): `src-tauri/target/release/bundle/dmg/*.dmg`
+- macOS (portable ZIP): `src-tauri/target/release/bundle/portable/*-macos-portable.zip`
 
-macOS note: if the app is unsigned, Gatekeeper may block it on first run. Allow it in System Settings > Privacy & Security.
+Manual macOS helpers:
+`bash scripts/macos/adhoc-sign.sh "/path/to/Local Files Chat.app"`
+`bash scripts/macos/make-portable-zip.sh`
+
+macOS note: the build uses ad-hoc signing (identity "-"). If Gatekeeper still blocks it, right-click the app and choose Open, or run:
+`xattr -dr com.apple.quarantine "/path/to/Local Files Chat.app"`. The portable ZIP includes a short `README-macOS-portable.txt`
+and `RemoveQuarantine.command` for convenience.
 
 ## Release (GitHub CLI)
 
@@ -117,7 +124,7 @@ The scripts:
 - update versions in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`
 - commit `Release vX.Y.Z`, create tag `vX.Y.Z`, push
 - build installers with `npx tauri build`
-- create/update the GitHub release and upload installers
+- create/update the GitHub release and upload installers (DMG + portable ZIP)
 
 ## License
 

@@ -1,4 +1,4 @@
-﻿import { useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+﻿import { useDeferredValue, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -615,9 +615,50 @@ type HelpIconProps = {
 };
 
 function HelpIcon({ text }: HelpIconProps) {
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const tooltipRef = useRef<HTMLSpanElement | null>(null);
+  const [shift, setShift] = useState(0);
+
+  function updateTooltipShift() {
+    const button = buttonRef.current;
+    const tooltip = tooltipRef.current;
+    if (!button || !tooltip) return;
+
+    const tooltipWidth = tooltip.offsetWidth;
+    if (!tooltipWidth) return;
+
+    const buttonRect = button.getBoundingClientRect();
+    const panel = button.closest(".settings-panel");
+    const panelRect = panel?.getBoundingClientRect();
+    const margin = 12;
+    const leftBoundary = (panelRect?.left ?? 0) + margin;
+    const rightBoundary = (panelRect?.right ?? window.innerWidth) - margin;
+    const defaultLeft = buttonRect.left + buttonRect.width / 2 - tooltipWidth / 2;
+    const maxLeft = rightBoundary - tooltipWidth;
+    const clampedLeft = maxLeft < leftBoundary ? leftBoundary : Math.min(Math.max(defaultLeft, leftBoundary), maxLeft);
+    const nextShift = Math.round(clampedLeft - defaultLeft);
+
+    if (nextShift !== shift) {
+      setShift(nextShift);
+    }
+  }
+
+  const tooltipStyle = { "--tooltip-shift": `${shift}px` } as CSSProperties;
+
   return (
-    <button type="button" className="help-icon" aria-label={text} data-tooltip={text}>
+    <button
+      ref={buttonRef}
+      type="button"
+      className="help-icon"
+      aria-label={text}
+      onMouseEnter={updateTooltipShift}
+      onFocus={updateTooltipShift}
+      style={tooltipStyle}
+    >
       {Icons.info}
+      <span ref={tooltipRef} className="help-tooltip" aria-hidden="true">
+        {text}
+      </span>
     </button>
   );
 }

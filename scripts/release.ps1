@@ -84,6 +84,9 @@ if ($nsis) { $assets += $nsis.FullName }
 $dmg = Get-ChildItem -Path (Join-Path $bundleDir "dmg") -Filter "*.dmg" -ErrorAction SilentlyContinue |
   Sort-Object LastWriteTime -Descending | Select-Object -First 1
 if ($dmg) { $assets += $dmg.FullName }
+$portable = Get-ChildItem -Path (Join-Path $bundleDir "portable") -Filter "*.zip" -ErrorAction SilentlyContinue |
+  Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if ($portable) { $assets += $portable.FullName }
 
 if ($assets.Count -eq 0) {
   Write-Warning "No installer assets found."

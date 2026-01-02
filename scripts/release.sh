@@ -44,6 +44,16 @@ git push --tags
 
 npx tauri build
 
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  APP_PATH="$(find "$ROOT/src-tauri/target/release/bundle" -maxdepth 3 -name "*.app" -print0 | xargs -0 ls -td 2>/dev/null | head -n 1 || true)"
+  if [[ -z "$APP_PATH" ]]; then
+    echo "No .app bundle found to sign."
+    exit 1
+  fi
+  "$ROOT/scripts/macos/adhoc-sign.sh" "$APP_PATH"
+  SKIP_ADHOC_SIGN=1 "$ROOT/scripts/macos/make-portable-zip.sh" "$APP_PATH"
+fi
+
 BUNDLE_DIR="$ROOT/src-tauri/target/release/bundle"
 assets=()
 
@@ -52,6 +62,9 @@ if ls "$BUNDLE_DIR/nsis"/*.exe >/dev/null 2>&1; then
 fi
 if ls "$BUNDLE_DIR/dmg"/*.dmg >/dev/null 2>&1; then
   assets+=("$(ls -t "$BUNDLE_DIR/dmg"/*.dmg | head -n 1)")
+fi
+if ls "$BUNDLE_DIR/portable"/*.zip >/dev/null 2>&1; then
+  assets+=("$(ls -t "$BUNDLE_DIR/portable"/*.zip | head -n 1)")
 fi
 
 if [[ ${#assets[@]} -eq 0 ]]; then
