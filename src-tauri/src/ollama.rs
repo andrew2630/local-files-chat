@@ -185,3 +185,58 @@ struct ChatRequest {
 struct ChatResponse {
   message: Option<ChatMessage>,
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn normalize_ollama_base_adds_scheme_and_api() {
+    assert_eq!(
+      normalize_ollama_base("localhost:11434"),
+      "http://localhost:11434/api".to_string()
+    );
+    assert_eq!(
+      normalize_ollama_base("http://localhost:11434"),
+      "http://localhost:11434/api".to_string()
+    );
+    assert_eq!(
+      normalize_ollama_base("http://localhost:11434/api"),
+      "http://localhost:11434/api".to_string()
+    );
+  }
+
+  #[test]
+  fn normalize_ollama_base_handles_trailing_slash_and_empty() {
+    assert_eq!(
+      normalize_ollama_base("http://localhost:11434/"),
+      "http://localhost:11434/api".to_string()
+    );
+    assert_eq!(
+      normalize_ollama_base("   "),
+      DEFAULT_OLLAMA_BASE.to_string()
+    );
+  }
+
+  #[test]
+  fn ollama_base_url_uses_env() {
+    let prev_base = std::env::var("OLLAMA_BASE_URL").ok();
+    let prev_host = std::env::var("OLLAMA_HOST").ok();
+
+    std::env::set_var("OLLAMA_BASE_URL", "example:11434/api");
+    std::env::remove_var("OLLAMA_HOST");
+    assert_eq!(ollama_base_url(), "http://example:11434/api".to_string());
+
+    if let Some(value) = prev_base {
+      std::env::set_var("OLLAMA_BASE_URL", value);
+    } else {
+      std::env::remove_var("OLLAMA_BASE_URL");
+    }
+
+    if let Some(value) = prev_host {
+      std::env::set_var("OLLAMA_HOST", value);
+    } else {
+      std::env::remove_var("OLLAMA_HOST");
+    }
+  }
+}

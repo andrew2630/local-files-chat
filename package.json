@@ -5,8 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "npm test && npm run test:tauri && tsc && vite build",
     "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:tauri": "cargo test --manifest-path src-tauri/Cargo.toml",
     "prepare-ocr": "node scripts/prepare-ocr.mjs",
     "tauri": "tauri"
   },
@@ -23,7 +26,12 @@
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",
+    "@testing-library/jest-dom": "^6.4.2",
+    "@testing-library/react": "^16.0.1",
+    "@testing-library/user-event": "^14.5.2",
+    "jsdom": "^24.0.0",
     "typescript": "~5.8.3",
+    "vitest": "^2.0.5",
     "vite": "^7.0.4"
   }
 }

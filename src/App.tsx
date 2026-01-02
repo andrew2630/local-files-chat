@@ -383,12 +383,12 @@ const OLLAMA_URL = "https://ollama.com/download";
 const DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434";
 const SETUP_MODAL_ANIM_MS = 240;
 
-function isEmbeddingModel(name: string) {
+export function isEmbeddingModel(name: string) {
   const lower = name.toLowerCase();
   return EMBED_HINTS.some((hint) => lower.includes(hint));
 }
 
-function formatSize(bytes: number) {
+export function formatSize(bytes: number) {
   if (!Number.isFinite(bytes) || bytes <= 0) return "";
   const units = ["B", "KB", "MB", "GB"];
   let size = bytes;
@@ -400,13 +400,13 @@ function formatSize(bytes: number) {
   return `${size.toFixed(size >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
 }
 
-function newId() {
+export function newId() {
   return typeof crypto !== "undefined" && "randomUUID" in crypto
     ? crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function loadJson<T>(key: string, fallback: T): T {
+export function loadJson<T>(key: string, fallback: T): T {
   try {
     const raw = localStorage.getItem(key);
     if (!raw) return fallback;
@@ -416,19 +416,19 @@ function loadJson<T>(key: string, fallback: T): T {
   }
 }
 
-function deriveTitle(messages: ChatMessage[], fallback: string) {
+export function deriveTitle(messages: ChatMessage[], fallback: string) {
   const firstUser = messages.find((m) => m.role === "user");
   if (!firstUser) return fallback;
   return firstUser.text.slice(0, 48);
 }
 
-function splitModelTag(name: string) {
+export function splitModelTag(name: string) {
   const idx = name.lastIndexOf(":");
   if (idx <= 0 || idx === name.length - 1) return { base: name, tag: null };
   return { base: name.slice(0, idx), tag: name.slice(idx + 1) };
 }
 
-function modelInstalled(models: string[], required: string) {
+export function modelInstalled(models: string[], required: string) {
   const req = splitModelTag(required);
   return models.some((model) => {
     const m = splitModelTag(model);
@@ -439,7 +439,7 @@ function modelInstalled(models: string[], required: string) {
   });
 }
 
-function getMissingModels(models: string[], defaults: { chat: string; fast: string; embed: string }) {
+export function getMissingModels(models: string[], defaults: { chat: string; fast: string; embed: string }) {
   const required = [defaults.chat, defaults.fast, defaults.embed];
   const missing = required.filter((model) => !modelInstalled(models, model));
   return Array.from(new Set(missing));

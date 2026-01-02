@@ -1230,3 +1230,80 @@ pub fn chat(app: &AppHandle, question: String, llm_model: String, embed_model: S
 
   Ok(ChatResult { answer, sources })
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::path::{Path, PathBuf};
+
+  #[test]
+  fn kind_from_path_detects_supported_extensions() {
+    assert_eq!(kind_from_path(Path::new("doc.pdf")), Some(DocumentKind::Pdf));
+    assert_eq!(kind_from_path(Path::new("doc.txt")), Some(DocumentKind::Txt));
+    assert_eq!(kind_from_path(Path::new("doc.md")), Some(DocumentKind::Md));
+    assert_eq!(kind_from_path(Path::new("doc.markdown")), Some(DocumentKind::Md));
+    assert_eq!(kind_from_path(Path::new("doc.docx")), Some(DocumentKind::Docx));
+    assert_eq!(kind_from_path(Path::new("doc.bin")), None);
+  }
+
+  #[test]
+  fn supported_document_checks_extension() {
+    assert!(is_supported_document(Path::new("report.pdf")));
+    assert!(!is_supported_document(Path::new("report.exe")));
+  }
+
+  #[test]
+  fn chunk_text_splits_with_overlap() {
+    let chunks = chunk_text("abcdefgh", 3, 1);
+    assert_eq!(chunks, vec!["abc", "cde", "efg", "gh"]);
+  }
+
+  #[test]
+  fn clean_text_strips_nuls_and_trims() {
+    assert_eq!(clean_text(" \0hello\0 "), "hello".to_string());
+  }
+
+  #[test]
+  fn split_pages_handles_form_feeds() {
+    let pages = split_pages("a\x0cb");
+    assert_eq!(pages, vec!["a", "b"]);
+    let pages_unicode = split_pages("a\u{000C}b");
+    assert_eq!(pages_unicode, vec!["a", "b"]);
+  }
+
+  #[test]
+  fn sanitize_and_build_fts_query() {
+    assert_eq!(sanitize_fts_token("hi!"), "hi".to_string());
+    assert_eq!(build_fts_query("a b cd"), Some("cd*".to_string()));
+    assert_eq!(build_fts_query("a"), None);
+  }
+
+  #[test]
+  fn cosine_similarity_handles_edge_cases() {
+    assert_eq!(cosine_similarity(&[], &[]), 0.0);
+    assert_eq!(cosine_similarity(&[1.0], &[0.0]), 0.0);
+    let sim = cosine_similarity(&[1.0, 0.0], &[1.0, 0.0]);
+    assert!((sim - 1.0).abs() < 1e-6);
+  }
+
+  #[test]
+  fn append_env_path_chains_values() {
+    std::env::remove_var("APPEND_ENV_TEST");
+    assert_eq!(append_env_path("APPEND_ENV_TEST", Path::new("C:\\tools")), "C:\\tools");
+    std::env::set_var("APPEND_ENV_TEST", "C:\\bin");
+    assert_eq!(append_env_path("APPEND_ENV_TEST", Path::new("C:\\tools")), "C:\\tools:C:\\bin");
+    std::env::remove_var("APPEND_ENV_TEST");
+  }
+
+  #[test]
+  fn tesseract_base_dir_detects_parent() {
+    let bin = PathBuf::from("C:\\tesseract\\bin\\tesseract.exe");
+    let base = tesseract_base_dir(&bin).unwrap();
+    assert!(base.ends_with("C:\\tesseract"));
+  }
+
+  #[test]
+  fn build_fts_query_filters_short_tokens() {
+    assert_eq!(build_fts_query("ok hi abc"), Some("ok* hi* abc*".to_string()));
+  }
+}

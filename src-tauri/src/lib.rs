@@ -584,3 +584,69 @@ pub fn run() {
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::collections::{HashMap, HashSet};
+  use std::path::PathBuf;
+  use std::sync::Mutex;
+
+  #[test]
+  fn split_model_tag_parses_tags() {
+    assert_eq!(split_model_tag("llama3:8b"), ("llama3", Some("8b")));
+    assert_eq!(split_model_tag("llama3"), ("llama3", None));
+  }
+
+  #[test]
+  fn model_installed_accepts_base_match() {
+    assert!(model_installed(&["llama3".into()], "llama3:8b"));
+    assert!(!model_installed(&["llama3:7b".into()], "llama3:8b"));
+    assert!(model_installed(&["llama3:8b".into()], "llama3"));
+  }
+
+  #[test]
+  fn panic_message_handles_known_types() {
+    assert_eq!(panic_message(Box::new("boom")), "boom".to_string());
+    assert_eq!(panic_message(Box::new(String::from("oops"))), "oops".to_string());
+    assert_eq!(panic_message(Box::new(42u8)), "unknown panic".to_string());
+  }
+
+  #[test]
+  fn run_index_task_catches_panics() {
+    let ok = run_index_task(|| Ok(()));
+    assert!(ok.is_ok());
+
+    let err = run_index_task(|| -> Result<(), String> {
+      panic!("boom");
+    })
+    .unwrap_err();
+    assert!(err.contains("index task panicked"));
+  }
+
+  #[test]
+  fn should_process_dedupes_events() {
+    let settings = library::IndexSettings {
+      chunk_size: 1400,
+      chunk_overlap: 250,
+      ocr_enabled: true,
+      ocr_lang: "pol+eng".into(),
+      ocr_min_chars: 120,
+      ocr_dpi: 300,
+    };
+
+    let inner = AppStateInner {
+      watcher: Mutex::new(None),
+      watched: Mutex::new(HashSet::new()),
+      last_event: Mutex::new(HashMap::new()),
+      last_embed_model: Mutex::new(String::new()),
+      last_index_settings: Mutex::new(settings),
+      target_files: Mutex::new(HashSet::new()),
+      folder_roots: Mutex::new(Vec::new()),
+    };
+
+    let path = PathBuf::from("C:\\temp\\file.txt");
+    assert!(should_process(&inner, &path));
+    assert!(!should_process(&inner, &path));
+  }
+}
